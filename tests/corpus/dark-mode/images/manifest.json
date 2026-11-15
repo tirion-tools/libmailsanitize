@@ -1,0 +1,135 @@
+{
+  "button-image.png": {
+    "has_transparency": true,
+    "height": 44,
+    "mode": "RGBA",
+    "sha256": "662f0fc4ec317d283ff38a9204cefe7fc31a5b4d0e1056fd0ae5b618b39e5467",
+    "width": 200
+  },
+  "divider.png": {
+    "has_transparency": false,
+    "height": 2,
+    "mode": "RGBA",
+    "sha256": "f09b403a780c1b2773bc00a658476aaad3266db5a94512ddfc8a96e2a87eaa25",
+    "width": 600
+  },
+  "hero-bg.jpg": {
+    "has_transparency": false,
+    "height": 300,
+    "mode": "RGB",
+    "sha256": "176a9c490d283e1536cdfb5b8a72b0c569223bfb893cb51a7fc72d0ba52dd92f",
+    "width": 600
+  },
+  "icon-check-green.png": {
+    "has_transparency": true,
+    "height": 40,
+    "mode": "RGBA",
+    "sha256": "951147a5995971c9984d5ae028ac2ff5ffd46c1585edc35e8df269bce6a202c5",
+    "width": 40
+  },
+  "logo-color-dark.png": {
+    "has_transparency": true,
+    "height": 40,
+    "mode": "RGBA",
+    "sha256": "a208e317b3488460e2099a1509ed9c6c813ceb86c9036d7616557a4563b7efed",
+    "width": 180
+  },
+  "logo-color.png": {
+    "has_transparency": true,
+    "height": 40,
+    "mode": "RGBA",
+    "sha256": "be71459799f658d3598a8838c57a40163cf178cc47b707847d412e7dc6792736",
+    "width": 180
+  },
+  "logo-dark.png": {
+    "has_transparency": true,
+    "height": 48,
+    "mode": "RGBA",
+    "sha256": "996e494c7e9bca23759bdbc6b620f2cc2145ec4e8fae01d3249d48eeb2e69880",
+    "width": 200
+  },
+  "logo-navy-icon.png": {
+    "has_transparency": true,
+    "height": 48,
+    "mode": "RGBA",
+    "sha256": "f97e9fb7c1d79ea4d4e3a3f666ad10712170b1dc3a732574bc8de0592c078941",
+    "width": 48
+  },
+  "logo-opaque-white.png": {
+    "has_transparency": false,
+    "height": 48,
+    "mode": "RGBA",
+    "sha256": "d9dba21da559fe498eb74f1c8d8aaf58cd1d75672c866d120a0e54812d181978",
+    "width": 160
+  },
+  "logo-white.png": {
+    "has_transparency": true,
+    "height": 48,
+    "mode": "RGBA",
+    "sha256": "82056ab268e06ac7cb4921f0fd26bca5a264b141141b7ce343257a30cbf9eebc",
+    "width": 200
+  },
+  "map.jpg": {
+    "has_transparency": false,
+    "height": 200,
+    "mode": "RGB",
+    "sha256": "6bd0a45b71a4b0b4370f81c30bb935471b3ab88fca38589be08383387ec8568b",
+    "width": 560
+  },
+  "photo-hero.jpg": {
+    "has_transparency": false,
+    "height": 240,
+    "mode": "RGB",
+    "sha256": "3c235af353ea325e5afcaab75458d2626832c9c2c33f5e954c0027d406a9f95c",
+    "width": 600
+  },
+  "product-1.jpg": {
+    "has_transparency": false,
+    "height": 80,
+    "mode": "RGB",
+    "sha256": "0c582c033c48872b02094daa8c1126dba6272e77a585676a88d4d248f0eee915",
+    "width": 80
+  },
+  "product-2.jpg": {
+    "has_transparency": false,
+    "height": 56,
+    "mode": "RGB",
+    "sha256": "36e9c7dff9206fa6ddd0db1290f6d2e74f28fea94d598b3c666e8008316afea7",
+    "width": 56
+  },
+  "signature-logo.png": {
+    "has_transparency": true,
+    "height": 36,
+    "mode": "RGBA",
+    "sha256": "225203665c7eee9efc78f5433dfc7da5f656a7a666ea6fb2b098f9a428b4f403",
+    "width": 150
+  },
+  "social-bird.png": {
+    "has_transparency": true,
+    "height": 24,
+    "mode": "RGBA",
+    "sha256": "6d795d17c57da616ff7d5ef5538ae31fa86fd9c666389d20dd5f1f0bea4f4564",
+    "width": 24
+  },
+  "social-circle.png": {
+    "has_transparency": true,
+    "height": 24,
+    "mode": "RGBA",
+    "sha256": "ca5ccbb48a06482c90e6d8a768d30abed3a0a36556efbbd9d90f595f48416067",
+    "width": 24
+  },
+  "social-play.png": {
+    "has_transparency": true,
+    "height": 24,
+    "mode": "RGBA",
+    "sha256": "ea21f8259c6cabccf9682c2e2fba2903bf9342fba69e75c518f0fba47f281ced",
+    "width": 24
+  },
+  "social-square.png": {
+    "has_transparency": true,
+    "height": 24,
+    "mode": "RGBA",
+    "sha256": "294a5b177af18836a535fdf2801db2b17d168561eda7a4e7f1a7dc9408db32ec",
+    "width": 24
+  }
+}

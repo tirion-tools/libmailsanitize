@@ -1,0 +1,30 @@
+<!DOCTYPE html>
+<html><head><meta charset="utf-8"><title>Release notes 4.2</title>
+<style>
+  .header { background:linear-gradient(135deg,#ff7e5f 0%,#feb47b 100%); color:#ffffff; }
+  .card { background:#ffffff; box-shadow:0 2px 6px rgba(0,0,0,0.12); border-radius:8px; }
+  .tag { display:inline-block; font-size:11px; font-weight:bold; padding:2px 8px; border-radius:10px; }
+  .tag-new { background:#d3f9d8; color:#2b8a3e; }
+  .tag-fix { background:#ffe3e3; color:#c92a2a; }
+</style></head>
+<body style="margin:0;background:#f1f3f5;font-family:'Segoe UI',Arial,sans-serif;color:#212529;">
+<table width="600" align="center" cellpadding="0" cellspacing="0">
+<tr><td class="header" style="padding:32px 28px;"><div style="font-size:28px;font-weight:bold;">Release 4.2</div><div style="font-size:15px;opacity:0.95;">Faster sync, calmer notifications</div></td></tr>
+<tr><td style="padding:20px 16px;">
+  <table class="card" width="100%" cellpadding="18" cellspacing="0"><tr><td>
+    <span class="tag tag-new">NEW</span>
+    <div style="font-size:17px;font-weight:bold;padding:6px 0 4px;">Background sync</div>
+    <div style="font-size:14px;line-height:21px;color:#495057;">Folders now refresh while the app is idle, using about half the battery of the previous approach.</div>
+  </td></tr></table>
+</td></tr>
+<tr><td style="padding:0 16px 20px;">
+  <table class="card" width="100%" cellpadding="18" cellspacing="0"><tr><td>
+    <span class="tag tag-fix">FIXED</span>
+    <div style="font-size:17px;font-weight:bold;padding:6px 0 4px;">Duplicate notifications</div>
+    <div style="font-size:14px;line-height:21px;color:#495057;">Messages read on another device no longer trigger a second alert.</div>
+    <pre style="background:#f8f9fa;border:1px solid #e9ecef;padding:10px;font-size:12px;color:#343a40;margin:10px 0 0;">notify.dedupe = true   # default since 4.2</pre>
+  </td></tr></table>
+</td></tr>
+<tr><td style="padding:0 16px 24px;font-size:12px;color:#868e96;text-align:center;">You get release notes because you are an admin of the Riverton workspace.</td></tr>
+</table>
+</body></html>

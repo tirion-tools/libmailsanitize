@@ -1,0 +1,28 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Quarterly report</title>
+  <style>
+    body { font-family: sans-serif; }
+    .total { font-weight: bold; }
+  </style>
+</head>
+<body>
+  <h1>Quarterly report</h1>
+  <p>Hello Alex,</p>
+  <p>The renderer should preserve readable structure while treating the message as hostile input.</p>
+  <table>
+    <caption>Delivery summary</caption>
+    <thead><tr><th scope="col">Region</th><th scope="col">Messages</th></tr></thead>
+    <tbody>
+      <tr><td>Europe</td><td>1,240</td></tr>
+      <tr><td>Asia Pacific</td><td>980</td></tr>
+      <tr class="total"><td>Total</td><td>2,220</td></tr>
+    </tbody>
+  </table>
+  <blockquote>Previous message text remains visibly quoted.</blockquote>
+  <p>Open the <a href="https://example.com/report?id=42">full report</a> or reply to this message.</p>
+  <p>Regards,<br><strong>Example Sender</strong></p>
+</body>
+</html>

@@ -1,0 +1,50 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="color-scheme" content="light dark">
+<meta name="supported-color-schemes" content="light dark">
+<title>Lumen Bank statement ready</title>
+<style>
+  :root { color-scheme: light dark; supported-color-schemes: light dark; }
+  body, .bg-page { background-color:#eef1f5; }
+  .card { background-color:#ffffff; color:#1f2933; }
+  .muted { color:#52606d; }
+  .logo-dark { display:none; }
+  .btn { background-color:#1a56db; color:#ffffff; }
+  .footer { color:#7b8794; }
+  @media (prefers-color-scheme: dark) {
+    body, .bg-page { background-color:#0b1220 !important; }
+    .card { background-color:#151e2e !important; color:#e4e7eb !important; }
+    .muted { color:#9aa5b1 !important; }
+    .logo-light { display:none !important; }
+    .logo-dark { display:inline-block !important; }
+    .btn { background-color:#3f83f8 !important; }
+    .footer { color:#9aa5b1 !important; }
+    .amount { color:#7ee2a8 !important; }
+  }
+</style>
+</head>
+<body class="bg-page" style="margin:0;font-family:Arial,sans-serif;">
+<table class="bg-page" width="100%" cellpadding="0" cellspacing="0"><tr><td align="center" style="padding:24px 0;">
+<table class="card" width="560" cellpadding="0" cellspacing="0" style="border-radius:10px;">
+  <tr><td style="padding:24px 28px 8px;">
+    <img class="logo-light" src="cid:logo-color.png" width="180" height="40" alt="Lumen Bank">
+    <img class="logo-dark" src="cid:logo-color-dark.png" width="180" height="40" alt="Lumen Bank">
+  </td></tr>
+  <tr><td style="padding:8px 28px;font-size:22px;font-weight:bold;">Your November statement is ready</td></tr>
+  <tr><td class="muted" style="padding:0 28px 16px;font-size:15px;line-height:22px;">Hi Jordan, your statement for the account ending 0042 is now available in online banking.</td></tr>
+  <tr><td style="padding:0 28px 16px;">
+    <table width="100%" cellpadding="0" cellspacing="0"><tr>
+      <td class="muted" style="font-size:13px;">Closing balance</td>
+      <td class="amount" align="right" style="font-size:20px;font-weight:bold;color:#0e7c3a;">$4,218.07</td>
+    </tr></table>
+  </td></tr>
+  <tr><td style="padding:0 28px 24px;">
+    <table cellpadding="0" cellspacing="0"><tr><td class="btn" style="border-radius:6px;padding:12px 24px;font-weight:bold;"><a href="https://example.com/statement" style="color:#ffffff;text-decoration:none;">View statement</a></td></tr></table>
+  </td></tr>
+</table>
+<table width="560"><tr><td class="footer" style="padding:16px 28px;font-size:12px;line-height:18px;">Lumen Bank will never ask for your password by email. Member FDIC.</td></tr></table>
+</td></tr></table>
+</body>
+</html>
