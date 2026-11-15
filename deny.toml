@@ -1,0 +1,47 @@
+# cargo-deny policy (tools/gate.sh audit): advisories, licences, bans and sources of the crate
+# and its fuzz harness.
+[graph]
+targets = ["x86_64-unknown-linux-gnu", "x86_64-unknown-linux-musl"]
+
+[advisories]
+yanked = "deny"
+
+[licenses]
+# Permissive licences only; anything else needs review before it is added here.
+allow = [
+  "MIT",
+  "Apache-2.0",
+  "Apache-2.0 WITH LLVM-exception",
+  "BSD-2-Clause",
+  "BSD-3-Clause",
+  "ISC",
+  "NCSA",
+  "Unicode-3.0",
+  "Zlib",
+]
+confidence-threshold = 0.9
+# The CSS stack (lightningcss reprints CSS; ammonia/html5ever's selectors): unmodified, file-level
+# copyleft; source available via Cargo.lock and crates.io. Scoped to exactly these crates.
+exceptions = [
+  { allow = ["MPL-2.0"], crate = "cssparser" },
+  { allow = ["MPL-2.0"], crate = "cssparser-color" },
+  { allow = ["MPL-2.0"], crate = "cssparser-macros" },
+  { allow = ["MPL-2.0"], crate = "dtoa-short" },
+  { allow = ["MPL-2.0"], crate = "lightningcss" },
+  { allow = ["MPL-2.0"], crate = "lightningcss-derive" },
+  { allow = ["MPL-2.0"], crate = "parcel_selectors" },
+  { allow = ["MPL-2.0"], crate = "selectors" },
+]
+
+[licenses.private]
+ignore = true
+
+[bans]
+multiple-versions = "warn"
+wildcards = "deny"
+allow-wildcard-paths = true
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]

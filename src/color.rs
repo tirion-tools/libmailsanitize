@@ -196,8 +196,11 @@ pub fn ensure_contrast(c: Rgb, bg: Rgb, target: f32) -> Rgb {
     }
 }
 
-/// Strict AA variant: also re-colour sender text on backgrounds the policy preserved.
-pub static STRICT: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+thread_local! {
+    /// Strict AA variant: also re-colour sender text on backgrounds the policy preserved. Per
+    /// thread, so concurrent documents on other threads never see another call's policy.
+    pub static STRICT: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
 
 fn same_color(a: Rgb, b: Rgb) -> bool {
     let (x, y) = (a.to_u8(), b.to_u8());
@@ -212,7 +215,7 @@ pub fn required_contrast(c: Rgb, bg: Rgb, orig_bg: Rgb) -> f32 {
     let (now_bg, then_bg) = (bg.over(CANVAS), orig_bg.over(Rgb::hex(0xffffff)));
     if !same_color(now_bg, then_bg) {
         TEXT_TARGET
-    } else if STRICT.load(std::sync::atomic::Ordering::Relaxed) {
+    } else if STRICT.with(std::cell::Cell::get) {
         4.5 // WCAG AA; sender pairs that already pass stay untouched
     } else {
         TEXT_TARGET.min(contrast(c.over(then_bg), then_bg))

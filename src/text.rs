@@ -54,7 +54,6 @@ const MIN_FONT_PX: f32 = 2.0;
 const MIN_CONTRAST: f32 = 1.25;
 /// Offsets at or beyond this (px, negative) are "off-screen".
 const OFFSCREEN_PX: f32 = -500.0;
-pub const TRUNCATED_MARK: &str = "[The text of this message was truncated]";
 pub const MISMATCH_NOTE: &str = "  (the link text shows a different address)";
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -85,8 +84,32 @@ const REASONS: [(Hidden, Reason); 11] = [
     (Hidden::DisplayNone, Reason::HiddenAttr),
 ];
 
-/// Manifest reason (proto `HiddenCount.Reason`) of each hidden-text rule.
-pub use proto::v1::sanitizer::hidden_count::Reason as Hidden;
+/// Why text was hidden from the reader. The discriminants are stable (a wire format may carry
+/// them as integers) and give the order of [`crate::Manifest::hidden`].
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Hash)]
+#[repr(u8)]
+pub enum Hidden {
+    /// `display:none`, the `hidden` attribute.
+    DisplayNone = 1,
+    /// `visibility:hidden` or `collapse`.
+    VisibilityHidden = 2,
+    /// `mso-hide:all`.
+    MsoHide = 3,
+    /// `opacity:0` or a transparent text colour.
+    Opacity = 4,
+    /// A zero-size box or a clip that shows nothing.
+    Clipped = 5,
+    /// Positioned or indented off-screen.
+    Offscreen = 6,
+    /// A font size below 2 px.
+    TinyFont = 7,
+    /// Text colour (almost) equal to its background.
+    LowContrast = 8,
+    /// Zero-width, joiner, tag and variation-selector characters.
+    InvisibleChar = 9,
+    /// Bidirectional override and isolate controls.
+    BidiControl = 10,
+}
 
 /// Most visible-text samples kept per listed link (manifest `ManifestLink.text_samples`).
 pub const MAX_SAMPLES: usize = 4;
@@ -1759,7 +1782,7 @@ impl State {
         }
     }
 
-    fn finish(mut self) -> TextOut {
+    fn finish(mut self, truncated_mark: &str) -> TextOut {
         self.pop_to(1);
         let truncated = self.out.truncated;
         let mut text = std::mem::take(&mut self.out.s);
@@ -1767,7 +1790,7 @@ impl State {
         text.truncate(body_len);
         if truncated {
             text.push_str("\n\n");
-            text.push_str(TRUNCATED_MARK);
+            text.push_str(truncated_mark);
         }
         if !self.links.is_empty() {
             if !text.is_empty() {
@@ -1806,7 +1829,7 @@ impl State {
             r.invisible + r.joiner + r.tag + r.varsel,
         );
         add(Hidden::BidiControl, r.bidi);
-        hidden.sort_by_key(|(h, _)| *h as i32);
+        hidden.sort_by_key(|(h, _)| *h as u8);
         let hidden_chars = self.hidden_chars.iter().sum::<usize>();
         TextOut {
             text,
@@ -1815,7 +1838,6 @@ impl State {
             hidden_chars: u32::try_from(hidden_chars).unwrap_or(u32::MAX),
             dropped_elements: u32::try_from(self.hidden_elements + self.overflowed)
                 .unwrap_or(u32::MAX),
-            truncated,
         }
     }
 }
@@ -1868,7 +1890,6 @@ pub struct TextOut {
     /// Characters hidden by the style rules (not counting removed format characters).
     pub hidden_chars: u32,
     pub dropped_elements: u32,
-    pub truncated: bool,
 }
 
 fn ws(b: u8) -> bool {
@@ -2030,8 +2051,9 @@ fn cap_attributes(input: &str) -> (Cow<'_, str>, usize) {
     }
 }
 
-/// Converts one HTML part. `input` is already UTF-8 (the helper decodes lossily).
-pub fn html_to_text(input: &str) -> TextOut {
+/// Converts one HTML part. `input` is already UTF-8 (the caller decodes lossily).
+/// `truncated_mark` ends the text when it was cut at the size cap.
+pub fn html_to_text(input: &str, truncated_mark: &str) -> TextOut {
     let (capped_input, _) = cap_attributes(input);
     let input: &str = &capped_input;
     let tok = Tokenizer::new(
@@ -2061,5 +2083,5 @@ pub fn html_to_text(input: &str) -> TextOut {
     }
     let Sink { st } = tok.sink;
     let st = st.into_inner();
-    st.finish()
+    st.finish(truncated_mark)
 }

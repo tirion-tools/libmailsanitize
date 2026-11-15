@@ -1,11 +1,9 @@
-//! Sanitize pipeline: ammonia allowlist + lightningcss CSS reprint.
-//! Image sources
-//! become opaque `resource://<id>/` references; only the caller maps ids to bytes:
+//! Sanitize pipeline: ammonia allowlist + lightningcss CSS reprint. Image sources become opaque
+//! `<scheme>://<id>/` references (the caller's scheme); only the caller maps ids to bytes:
 //! - `cid:` parts: id = [`cid_resource_id`] of the Content-ID, kept only when the caller listed
-//!   that id in the request (`Sanitize.resource_ids`), recorded in `resource_ids_used`;
+//!   that id, recorded in `resource_ids_used`;
 //! - http(s) images: a sanitizer-assigned placeholder id `img-N` (manifest `remote_images`, at
-//!   most [`MAX_REMOTE_IMAGES`]); the fetcher/renderer supply them later or the reader shows the
-//!   placeholder;
+//!   most [`MAX_REMOTE_IMAGES`]); the caller supplies them later or shows the placeholder;
 //! - inline `data:` PNG/JPEG are kept; every other source is dropped.
 use std::borrow::Cow;
 use std::cell::RefCell;
@@ -147,6 +145,8 @@ pub fn valid_resource_id(id: &str) -> bool {
 /// Per-document state; [`begin`] resets it, [`finish`] takes it out.
 #[derive(Default)]
 pub struct Resources {
+    /// `<scheme>://` of the rewritten references.
+    pub prefix: String,
     pub cid_allowed: Vec<String>,
     pub cid_used: Vec<String>,
     /// (placeholder id, canonical URL, width, height).
@@ -158,9 +158,10 @@ thread_local! {
     static RESOURCES: RefCell<Resources> = RefCell::new(Resources::default());
 }
 
-pub fn begin(cid_allowed: Vec<String>) {
+pub fn begin(scheme: &str, cid_allowed: Vec<String>) {
     RESOURCES.with(|r| {
         *r.borrow_mut() = Resources {
+            prefix: format!("{scheme}://"),
             cid_allowed,
             ..Resources::default()
         }
@@ -203,7 +204,7 @@ fn map_cid(reference: &str) -> Option<String> {
         if !r.cid_used.contains(&id) {
             r.cid_used.push(id.clone());
         }
-        Some(format!("resource://{id}/"))
+        Some(format!("{}{id}/", r.prefix))
     })
 }
 
@@ -218,7 +219,7 @@ fn map_remote(value: &str) -> Option<String> {
             Some(u) if r.remote.len() < MAX_REMOTE_IMAGES => {
                 let id = format!("img-{}", r.remote.len());
                 r.remote.push((id.clone(), u, 0, 0));
-                Some(format!("resource://{id}/"))
+                Some(format!("{}{id}/", r.prefix))
             }
             _ => {
                 r.remote_dropped = r.remote_dropped.saturating_add(1);
@@ -230,11 +231,13 @@ fn map_remote(value: &str) -> Option<String> {
 
 /// Records the rendered size hint of a remote placeholder (`img-N`).
 fn note_size(src: &str, w: Option<String>, h: Option<String>) {
-    let Some(n) = src
-        .strip_prefix("resource://img-")
-        .and_then(|t| t.strip_suffix('/'))
-        .and_then(|t| t.parse::<usize>().ok())
-    else {
+    let Some(n) = RESOURCES.with(|r| {
+        src.strip_prefix(r.borrow().prefix.as_str())?
+            .strip_prefix("img-")?
+            .strip_suffix('/')?
+            .parse::<usize>()
+            .ok()
+    }) else {
         return;
     };
     let px = |v: Option<String>| {

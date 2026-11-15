@@ -51,8 +51,6 @@ struct Walker {
 
 pub struct DomResult {
     pub html: String,
-    pub sender_dark: bool,
-    pub stats: Stats,
 }
 
 fn class_colors(
@@ -391,10 +389,5 @@ pub fn process(sanitized: &str, mode: Mode) -> DomResult {
         },
     )
     .unwrap_or_default();
-    let stats = walker.borrow().stats.clone();
-    DomResult {
-        html,
-        sender_dark,
-        stats,
-    }
+    DomResult { html }
 }
