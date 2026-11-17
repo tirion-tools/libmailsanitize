@@ -6,7 +6,8 @@
 //! - no `</` in a `<style>` text (nothing can end the element early);
 //! - no script, frame, plugin, form, `<base>`, `<link>`, `<template>`, SVG or MathML element, and
 //!   one `<meta>`, the frame's `charset` (no `http-equiv`);
-//! - no `on*` attribute, no `javascript:` or `vbscript:` URL, `data:` only for PNG/JPEG images;
+//! - no `on*` attribute, no `javascript:`, `vbscript:` or `data:` URL (inline images leave as
+//!   `dat-N` resources);
 //! - the sanitizer's own output check held (no `data-gx-fallback` on `<body>`).
 #![no_main]
 
@@ -162,14 +163,7 @@ fn check_document(doc: &str) {
                     !url.starts_with("javascript:") && !url.starts_with("vbscript:"),
                     "{attr}={url}"
                 );
-                assert!(
-                    !url.starts_with("data:")
-                        || (tag == "img"
-                            && attr == "src"
-                            && (url.starts_with("data:image/png;base64,")
-                                || url.starts_with("data:image/jpeg;base64,"))),
-                    "{attr}={url} on <{tag}>"
-                );
+                assert!(!url.starts_with("data:"), "{attr}={url} on <{tag}>");
             }
         }
     }

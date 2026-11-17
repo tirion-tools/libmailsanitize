@@ -17,14 +17,18 @@ This crate is glue around existing libraries; it does not replace them, and fixe
 - **[lightningcss](https://crates.io/crates/lightningcss)** parses and re-prints all CSS. Ammonia does not parse CSS
   values; this crate adds the CSS allowlist as a lightningcss visitor. Only style and `@media` rules are kept. The
   properties `position`, `z-index`, `content`, `behavior`, `cursor`, `animation*` and `transition*` are dropped, and so
-  is every `url()` except inline PNG/JPEG.
+  is every `url()` except inline PNG/JPEG, which becomes a resource reference like an `<img>` source.
 - **[html5ever](https://crates.io/crates/html5ever)**'s tokenizer drives the text fallback; **[lol_html](https://crates.io/crates/lol_html)**
   does the streaming rewrites (pre-scan, dark transform); **[palette](https://crates.io/crates/palette)** does the colour
   maths.
 
 What it adds:
 - the email allowlist;
-- image references rewritten to caller-resolved ids, with a manifest;
+- image references rewritten to caller-resolved ids, with a manifest: `cid:` parts, remote images (placeholder ids),
+  and inline `data:` PNG/JPEG, whose base64-decoded bytes travel in the manifest (`inline_images`) instead of the
+  document, so the caller decides what a renderer's image decoders ever see (for example a re-encoding of its own);
+- an images-off policy (`Config::images`, `Images::Off`): every image source becomes one placeholder id and the
+  manifest lists no image;
 - dark policy v1;
 - a bounded text fallback that counts hidden text and flags links whose text shows a different address.
 

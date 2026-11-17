@@ -224,7 +224,9 @@ fn on_element(w: &mut Walker, el: &mut lol_html::html_content::Element) {
     }
 
     if tag == "img"
-        && let Some(px) = el.get_attribute("src").as_deref().and_then(visible_pixels)
+        && let Some(px) = el
+            .get_attribute("src")
+            .and_then(|src| crate::sanitize::with_inline(&src, visible_pixels))
     {
         let low_new = low_contrast_fraction(&px, mapped_bg);
         let low_orig = low_contrast_fraction(&px, orig_bg.over(WHITE));

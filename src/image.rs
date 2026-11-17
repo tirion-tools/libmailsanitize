@@ -1,18 +1,12 @@
 //! Transparent-image visibility analysis for the backdrop rule.
 
-use base64::Engine;
-
 use crate::color::{Rgb, contrast};
 
 const MAX_DIMENSION: u32 = 4096;
 const MAX_SAMPLES: usize = 4096;
 
 /// Visible (alpha >= 128) pixels of a transparent PNG, subsampled. None for opaque or non-PNG images.
-pub fn visible_pixels(src: &str) -> Option<Vec<Rgb>> {
-    let payload = src.trim().strip_prefix("data:image/png;base64,")?;
-    let bytes = base64::engine::general_purpose::STANDARD
-        .decode(payload.trim())
-        .ok()?;
+pub fn visible_pixels(bytes: &[u8]) -> Option<Vec<Rgb>> {
     let mut decoder = png::Decoder::new(std::io::Cursor::new(bytes));
     decoder.set_transformations(png::Transformations::normalize_to_color8());
     let mut reader = decoder.read_info().ok()?;

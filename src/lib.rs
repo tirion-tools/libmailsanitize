@@ -19,17 +19,31 @@ mod sanitize;
 mod text;
 
 pub use sanitize::{
-    MAX_CID_IDS, MAX_REMOTE_IMAGES, MAX_RESOURCE_ID, cid_resource_id, valid_resource_id,
+    MAX_CID_IDS, MAX_INLINE_BYTES, MAX_INLINE_IMAGES, MAX_REMOTE_IMAGES, MAX_RESOURCE_ID,
+    OFF_RESOURCE_ID, cid_resource_id, valid_resource_id,
 };
 pub use text::{Hidden, MAX_LINKS, MAX_URL, TEXT_CAP};
 
-/// Caller-chosen strings that end up in the output.
+/// What the sanitized document does with images.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Images {
+    /// CID, inline and remote images become resource references listed in the manifest.
+    #[default]
+    Resources,
+    /// Every `<img>` source becomes `<scheme>://`[`OFF_RESOURCE_ID`]`/` (the caller's placeholder),
+    /// CSS images are dropped, and the manifest lists no image: nothing of the sender's image
+    /// bytes is decoded here or handed on.
+    Off,
+}
+
+/// Caller choices: strings that end up in the output, and the image policy.
 #[derive(Debug, Clone, Copy)]
 pub struct Config<'a> {
     /// URL scheme of rewritten image references, `<scheme>://<id>/`: `[a-z][a-z0-9+.-]*`.
     pub resource_scheme: &'a str,
     /// Line appended to the text when it was cut at [`TEXT_CAP`].
     pub truncated_mark: &'a str,
+    pub images: Images,
 }
 
 impl Default for Config<'static> {
@@ -37,6 +51,7 @@ impl Default for Config<'static> {
         Config {
             resource_scheme: "mail-resource",
             truncated_mark: "[The text of this message was truncated]",
+            images: Images::Resources,
         }
     }
 }
@@ -91,6 +106,16 @@ pub struct RemoteImage {
     pub height: u32,
 }
 
+/// An inline (`data:`) image: its bytes are the sender's, undecoded; the caller supplies them under
+/// `id` (after whatever validation or transcoding it applies) or shows a placeholder.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InlineImage {
+    /// `dat-N`, valid per [`valid_resource_id`].
+    pub id: String,
+    /// Declared PNG or JPEG, base64-decoded; never empty.
+    pub data: Vec<u8>,
+}
+
 /// What a document contains besides its text.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Manifest {
@@ -104,6 +129,11 @@ pub struct Manifest {
     pub remote_images: Vec<RemoteImage>,
     /// Remote images over the cap.
     pub remote_images_dropped: u32,
+    /// At most [`MAX_INLINE_IMAGES`], together at most [`MAX_INLINE_BYTES`]; identical bytes share
+    /// one entry.
+    pub inline_images: Vec<InlineImage>,
+    /// Inline images over the caps, undecodable, or of another type.
+    pub inline_images_dropped: u32,
 }
 
 /// Sanitized document plus its manifest.
@@ -158,10 +188,16 @@ pub fn sanitize(input: &str, theme: Theme, cid_ids: Vec<String>, config: &Config
         valid_scheme(config.resource_scheme),
         "invalid resource scheme"
     );
-    sanitize::begin(config.resource_scheme, cid_ids);
+    sanitize::begin(
+        config.resource_scheme,
+        cid_ids,
+        config.images == Images::Off,
+    );
     let (sanitized, elements) = sanitize::sanitize(input);
-    let res = sanitize::finish();
     let mut manifest = links_and_hidden(&text::html_to_text(&sanitized, config.truncated_mark));
+    // The dark pass reads the inline images (transparent-PNG backdrops) before `finish`.
+    let document = themed(sanitized, theme);
+    let res = sanitize::finish();
     manifest.resource_ids_used = res.cid_used;
     manifest.remote_images = res
         .remote
@@ -174,7 +210,12 @@ pub fn sanitize(input: &str, theme: Theme, cid_ids: Vec<String>, config: &Config
         })
         .collect();
     manifest.remote_images_dropped = res.remote_dropped;
-    let document = themed(sanitized, theme);
+    manifest.inline_images = res
+        .inline
+        .into_iter()
+        .map(|(id, data)| InlineImage { id, data })
+        .collect();
+    manifest.inline_images_dropped = res.inline_dropped;
     if roundtrip::holds(&elements, &document) {
         Sanitized { manifest, document }
     } else {
@@ -362,6 +403,124 @@ mod tests {
         assert!(valid_resource_id(&s.manifest.resource_ids_used[0]));
     }
 
+    // 1x1 transparent PNG.
+    const PNG_B64: &str = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAAC0lEQVR42mNgAAIAAAUAAen63NgAAAAASUVORK5CYII=";
+
+    fn png_bytes() -> Vec<u8> {
+        use base64::Engine;
+        base64::engine::general_purpose::STANDARD
+            .decode(PNG_B64)
+            .expect("b64")
+    }
+
+    #[test]
+    fn inline_images_become_resources_and_never_stay_in_the_document() {
+        let html = format!(
+            "<img src='data:image/png;base64,{PNG_B64}'>\
+             <img src=' DATA:image/PNG;base64,{} '>\
+             <div style=\"background-image:url('data:image/png;base64,{PNG_B64}')\">x</div>\
+             <style>td{{background:url(data:image/jpeg;base64,/9j/4AAQ)}}</style>\
+             <img src='data:image/svg+xml;base64,PHN2Zz4='><img src='data:image/png;base64,!!!'>",
+            PNG_B64[..20].to_string() + "\n" + &PNG_B64[20..]
+        );
+        for theme in [Theme::Light, Theme::Dark, Theme::DarkStrict] {
+            let s = sanitize(&html, theme, vec![], &Config::default());
+            assert!(!s.document.contains("base64"), "{theme:?}: {}", s.document);
+            assert!(!s.document.contains("data:"), "{theme:?}");
+            assert_eq!(
+                s.document.matches("mail-resource://dat-0/").count(),
+                3,
+                "{}",
+                s.document
+            );
+            assert!(
+                s.document.contains("mail-resource://dat-1/"),
+                "{}",
+                s.document
+            );
+            let m = &s.manifest;
+            assert_eq!(m.inline_images.len(), 2);
+            assert_eq!(m.inline_images[0].id, "dat-0");
+            assert_eq!(m.inline_images[0].data, png_bytes());
+            assert_eq!(
+                m.inline_images[1].data,
+                [0xff, 0xd8, 0xff, 0xe0, 0x00, 0x10]
+            );
+            assert_eq!(m.inline_images_dropped, 2, "svg and undecodable");
+            assert!(m.inline_images.iter().all(|i| valid_resource_id(&i.id)));
+        }
+    }
+
+    #[test]
+    fn inline_images_are_capped() {
+        use base64::Engine;
+        let mut html = String::new();
+        for i in 0..=MAX_INLINE_IMAGES {
+            let b = base64::engine::general_purpose::STANDARD.encode([0x89, b'P', i as u8]);
+            html.push_str(&format!("<img src='data:image/png;base64,{b}'>"));
+        }
+        let big = base64::engine::general_purpose::STANDARD.encode(vec![7u8; MAX_INLINE_BYTES]);
+        html.push_str(&format!("<img src='data:image/jpeg;base64,{big}'>"));
+        let s = sanitize(&html, Theme::Light, vec![], &Config::default());
+        assert_eq!(s.manifest.inline_images.len(), MAX_INLINE_IMAGES);
+        assert_eq!(s.manifest.inline_images_dropped, 2);
+        assert!(!s.document.contains(&format!("dat-{MAX_INLINE_IMAGES}/")));
+    }
+
+    #[test]
+    fn images_off_maps_every_image_to_the_placeholder() {
+        let cid = cid_resource_id(b"logo@x");
+        let cfg = Config {
+            images: Images::Off,
+            ..Config::default()
+        };
+        let html = format!(
+            "<img src='cid:logo@x' width='40' alt='Logo'><img src='https://img.test/a.png'>\
+             <img src='data:image/png;base64,{PNG_B64}'>\
+             <p style=\"color:red;background:url('data:image/png;base64,{PNG_B64}')\">t</p>\
+             <style>p{{background-image:url(data:image/png;base64,{PNG_B64});color:blue}}</style>"
+        );
+        for theme in [Theme::Light, Theme::Dark] {
+            let s = sanitize(&html, theme, vec![cid.clone()], &cfg);
+            assert_eq!(
+                s.document.matches("mail-resource://off/").count(),
+                3,
+                "{}",
+                s.document
+            );
+            assert!(!s.document.contains("base64") && !s.document.contains("img.test"));
+            assert!(!s.document.contains(&cid));
+            assert!(s.document.contains("width=\"40\"") && s.document.contains("Logo"));
+            let m = &s.manifest;
+            assert!(m.resource_ids_used.is_empty() && m.remote_images.is_empty());
+            assert!(m.inline_images.is_empty());
+            assert_eq!(m.remote_images_dropped + m.inline_images_dropped, 0);
+        }
+    }
+
+    #[test]
+    fn dark_backdrop_still_reads_inline_pngs() {
+        // Dark text-coloured transparent PNG: gets a backdrop in dark mode (dom.rs image rule).
+        let mut img = Vec::new();
+        {
+            let mut e = png::Encoder::new(&mut img, 8, 8);
+            e.set_color(png::ColorType::Rgba);
+            e.set_depth(png::BitDepth::Eight);
+            let mut w = e.write_header().expect("header");
+            let mut px = vec![0u8; 8 * 8 * 4];
+            for (i, p) in px.chunks_exact_mut(4).enumerate() {
+                p[3] = if i % 2 == 0 { 255 } else { 0 };
+            }
+            w.write_image_data(&px).expect("data");
+        }
+        use base64::Engine;
+        let b = base64::engine::general_purpose::STANDARD.encode(&img);
+        let html = format!("<img src='data:image/png;base64,{b}'>");
+        let d = sanitize(&html, Theme::Dark, vec![], &Config::default());
+        assert!(d.document.contains("background-color:"), "{}", d.document);
+        assert_eq!(d.manifest.inline_images[0].data, img);
+    }
+
     #[test]
     fn dark_strict_differs_from_v1_only_by_policy() {
         let html = "<table><tr><td bgcolor='#ff8800' style='color:#ffffff'>Buy</td></tr></table><p>text</p>";
@@ -389,6 +548,7 @@ mod tests {
         let cfg = Config {
             resource_scheme: "x-res",
             truncated_mark: "[cut]",
+            ..Config::default()
         };
         let s = sanitize(
             "<img src='https://img.test/a.png' width='5'>",

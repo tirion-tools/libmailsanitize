@@ -143,6 +143,8 @@ const DENIED_PROPERTIES: &[&str] = &[
     "content",
 ];
 
+/// Rewrites inline image URLs to their resource reference (`crate::sanitize::map_css_url`) and
+/// flags any other URL.
 struct UrlCheck {
     unsafe_url: bool,
 }
@@ -153,9 +155,9 @@ impl<'i> Visitor<'i> for UrlCheck {
         visit_types!(URLS)
     }
     fn visit_url(&mut self, url: &mut Url<'i>) -> Result<(), Self::Error> {
-        let u = url.url.trim_start().to_ascii_lowercase();
-        if !(u.starts_with("data:image/png;base64,") || u.starts_with("data:image/jpeg;base64,")) {
-            self.unsafe_url = true;
+        match crate::sanitize::map_css_url(&url.url) {
+            Some(mapped) => url.url = mapped.into(),
+            None => self.unsafe_url = true,
         }
         Ok(())
     }

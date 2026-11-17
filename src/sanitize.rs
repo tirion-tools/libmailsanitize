@@ -4,7 +4,15 @@
 //!   that id, recorded in `resource_ids_used`;
 //! - http(s) images: a sanitizer-assigned placeholder id `img-N` (manifest `remote_images`, at
 //!   most [`MAX_REMOTE_IMAGES`]); the caller supplies them later or shows the placeholder;
-//! - inline `data:` PNG/JPEG are kept; every other source is dropped.
+//! - inline `data:` PNG/JPEG (`<img src>` and CSS `url()`): decoded from base64 into
+//!   `inline` (manifest `inline_images`, id `dat-N`, identical bytes share an id, at most
+//!   [`MAX_INLINE_IMAGES`] and [`MAX_INLINE_BYTES`]); the document never carries image bytes, so
+//!   the caller decides what (if anything) a renderer's image decoders see;
+//! - every other source is dropped.
+//!
+//! With images off ([`crate::Images::Off`]) every kept `<img>` source becomes the fixed
+//! [`OFF_RESOURCE_ID`] (the caller's placeholder), CSS images are dropped, and the manifest lists
+//! no CID, inline or remote image.
 use std::borrow::Cow;
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
@@ -102,8 +110,8 @@ fn builder() -> ammonia::Builder<'static> {
         ("img", "src") => {
             let url = url_as_parsed(value);
             let v = url.to_ascii_lowercase();
-            if v.starts_with("data:image/png;base64,") || v.starts_with("data:image/jpeg;base64,") {
-                Some(Cow::Borrowed(value))
+            if v.starts_with("data:") {
+                map_inline(&url).map(Cow::Owned)
             } else if v.starts_with("cid:") {
                 map_cid(&url).map(Cow::Owned)
             } else {
@@ -124,6 +132,12 @@ fn builder() -> ammonia::Builder<'static> {
 pub const MAX_CID_IDS: usize = 64;
 pub const MAX_REMOTE_IMAGES: usize = 256;
 pub const MAX_RESOURCE_ID: usize = 64;
+/// Distinct inline (`data:`) images per document; more are dropped.
+pub const MAX_INLINE_IMAGES: usize = 64;
+/// Decoded bytes of all inline images of a document; an image over the total is dropped.
+pub const MAX_INLINE_BYTES: usize = 8 << 20;
+/// The one resource id every image source gets with images off.
+pub const OFF_RESOURCE_ID: &str = "off";
 
 /// Resource id of a Content-ID (without `<>`): `cid-` + FNV-1a-64 of its bytes, lowercase hex.
 /// Callers compute the same id for the parts they can supply.
@@ -155,17 +169,23 @@ pub struct Resources {
     /// (placeholder id, canonical URL, width, height).
     pub remote: Vec<(String, String, u32, u32)>,
     pub remote_dropped: u32,
+    /// (id `dat-N`, decoded PNG/JPEG bytes as the sender wrote them).
+    pub inline: Vec<(String, Vec<u8>)>,
+    pub inline_bytes: usize,
+    pub inline_dropped: u32,
+    pub images_off: bool,
 }
 
 thread_local! {
     static RESOURCES: RefCell<Resources> = RefCell::new(Resources::default());
 }
 
-pub fn begin(scheme: &str, cid_allowed: Vec<String>) {
+pub fn begin(scheme: &str, cid_allowed: Vec<String>, images_off: bool) {
     RESOURCES.with(|r| {
         *r.borrow_mut() = Resources {
             prefix: format!("{scheme}://"),
             cid_allowed,
+            images_off,
             ..Resources::default()
         }
     });
@@ -197,7 +217,95 @@ fn percent_decode(s: &str) -> Vec<u8> {
     out
 }
 
+fn off_reference() -> Option<String> {
+    RESOURCES.with(|r| {
+        let r = r.borrow();
+        r.images_off
+            .then(|| format!("{}{OFF_RESOURCE_ID}/", r.prefix))
+    })
+}
+
+/// The payload bytes of `data:image/png;base64,…` or `data:image/jpeg;base64,…` (ASCII case of the
+/// prefix ignored, whitespace in the payload skipped); None for any other `data:` URL.
+fn inline_payload(value: &str) -> Option<Vec<u8>> {
+    use base64::Engine;
+    let v = value.trim();
+    let head = v.get(..23)?.to_ascii_lowercase();
+    let rest = if head.starts_with("data:image/png;base64,") {
+        &v[22..]
+    } else if head.starts_with("data:image/jpeg;base64,") {
+        &v[23..]
+    } else {
+        return None;
+    };
+    let clean: Vec<u8> = rest.bytes().filter(|b| !b.is_ascii_whitespace()).collect();
+    base64::engine::general_purpose::STANDARD.decode(clean).ok()
+}
+
+/// `<scheme>://dat-N/` for an inline PNG/JPEG within the caps (or the off placeholder for an
+/// `<img>` with images off); None drops the source.
+fn map_inline(value: &str) -> Option<String> {
+    if let Some(off) = off_reference() {
+        return Some(off);
+    }
+    let bytes = inline_payload(value).filter(|b| !b.is_empty());
+    RESOURCES.with(|r| {
+        let mut r = r.borrow_mut();
+        let Some(bytes) = bytes else {
+            r.inline_dropped = r.inline_dropped.saturating_add(1);
+            return None;
+        };
+        if let Some((id, _)) = r.inline.iter().find(|(_, b)| *b == bytes) {
+            return Some(format!("{}{id}/", r.prefix));
+        }
+        if r.inline.len() >= MAX_INLINE_IMAGES || r.inline_bytes + bytes.len() > MAX_INLINE_BYTES {
+            r.inline_dropped = r.inline_dropped.saturating_add(1);
+            return None;
+        }
+        let id = format!("dat-{}", r.inline.len());
+        r.inline_bytes += bytes.len();
+        r.inline.push((id.clone(), bytes));
+        Some(format!("{}{id}/", r.prefix))
+    })
+}
+
+/// CSS `url()`: an inline PNG/JPEG becomes its `<scheme>://dat-N/` reference; a reference this
+/// document already carries (the dark pass re-reads sanitized CSS) is kept; anything else, and
+/// every image with images off, is refused (None).
+pub fn map_css_url(url: &str) -> Option<String> {
+    if RESOURCES.with(|r| r.borrow().images_off) {
+        return None;
+    }
+    if url.trim_start().to_ascii_lowercase().starts_with("data:") {
+        return map_inline(url);
+    }
+    RESOURCES.with(|r| {
+        let r = r.borrow();
+        let id = url.strip_prefix(r.prefix.as_str())?.strip_suffix('/')?;
+        r.inline
+            .iter()
+            .any(|(i, _)| i == id)
+            .then(|| url.to_string())
+    })
+}
+
+/// Runs `f` on the bytes an inline reference (`<scheme>://dat-N/`) of this document names.
+pub fn with_inline<T>(src: &str, f: impl FnOnce(&[u8]) -> Option<T>) -> Option<T> {
+    RESOURCES.with(|r| {
+        let r = r.borrow();
+        let id = src
+            .trim()
+            .strip_prefix(r.prefix.as_str())?
+            .strip_suffix('/')?;
+        let (_, bytes) = r.inline.iter().find(|(i, _)| i == id)?;
+        f(bytes)
+    })
+}
+
 fn map_cid(reference: &str) -> Option<String> {
+    if let Some(off) = off_reference() {
+        return Some(off);
+    }
     let id = cid_resource_id(&percent_decode(&reference[4..]));
     RESOURCES.with(|r| {
         let mut r = r.borrow_mut();
@@ -212,6 +320,9 @@ fn map_cid(reference: &str) -> Option<String> {
 }
 
 fn map_remote(value: &str) -> Option<String> {
+    if let Some(off) = off_reference() {
+        return Some(off);
+    }
     let url = match crate::text::link_target(value) {
         crate::text::LinkOut::Url(u) if u.starts_with("http") => Some(u),
         _ => None,
