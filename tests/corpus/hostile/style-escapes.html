@@ -1,0 +1,17 @@
+<!doctype html>
+<html>
+<head>
+<style>a{font-family:"\3c/style\3e\3cscript\3e alert(1)\3c/script\3e"}</style>
+<style>a{font-family:"\3c/style\3e\3ciframe src=https://example.invalid/\3e\3cmeta http-equiv=refresh content=0;url=https://example.invalid/\3e\3cimg src=https://example.invalid/t.png\3e\3c a href=javascript:alert(1)\3e x\3c/a\3e"}</style>
+<style>a{background:url(data:image/png;base64,\3c/style\3e\3cscript\3ealert\28 1\29\3c/script\3e)}</style>
+<style>a[title="\3c/style\3e\3cscript\3e"]{color:red}</style>
+<style>a{--x:"\3c/style\3e\3cscript\3e"}</style>
+<style>a{x:\3c/style\3e\3cscript\3e}</style>
+<style>.a\3c script{color:red}</style>
+<style>@media (max-width:600px){a{font-family:"\3c/style\3e\3cscript\3e"}}</style>
+<style>/*! <script> license */ a{color:red}</style>
+</head>
+<body>
+<p style='font-family:"\3c/style\3e\3cscript\3e"'>CSS escapes that decode to markup stay inside their sheet or attribute.</p>
+</body>
+</html>

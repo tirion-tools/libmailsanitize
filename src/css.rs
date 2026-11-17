@@ -49,6 +49,64 @@ fn printer() -> PrinterOptions<'static> {
     }
 }
 
+/// A sheet printed for a `<style>` element. Every sheet that reaches the document is printed here.
+fn sheet_html(sheet: &StyleSheet) -> String {
+    sheet
+        .to_css(printer())
+        .map(|r| html_inert(&r.code))
+        .unwrap_or_default()
+}
+
+/// A declaration block printed for a `style` attribute. Every block that reaches the document is
+/// printed here.
+fn attr_html(attr: &StyleAttribute) -> Option<String> {
+    attr.to_css(printer()).ok().map(|r| html_inert(&r.code))
+}
+
+/// Printed CSS made inert as HTML. lightningcss decodes escapes and prints what they stand for
+/// (`"\3c/style\3e"` prints as `"</style>"`), and a `</style` in a sheet ends the element in every
+/// HTML parser, so the rest of the sheet would be parsed as markup. A `<` starts markup only when a
+/// letter, `/`, `!` or `?` follows it, so none does here: in a string and after a backslash the
+/// `<` becomes the escape `\3c `, and a bare `<` (a delim, as in `@media (400px<width)`) gets a
+/// space after it. The CSS means the same.
+fn html_inert(css: &str) -> String {
+    let mut out = String::with_capacity(css.len());
+    let mut quote = None;
+    let mut chars = css.chars().peekable();
+    while let Some(c) = chars.next() {
+        match (c, quote) {
+            ('\\', _) => match chars.next() {
+                Some('<') => out.push_str("\\3c "),
+                Some(n) => {
+                    out.push('\\');
+                    out.push(n);
+                }
+                None => out.push('\\'),
+            },
+            ('<', Some(_)) => out.push_str("\\3c "),
+            ('<', None) => {
+                out.push('<');
+                if chars
+                    .peek()
+                    .is_some_and(|n| n.is_ascii_alphabetic() || matches!(n, '/' | '!' | '?'))
+                {
+                    out.push(' ');
+                }
+            }
+            ('"' | '\'', None) => {
+                quote = Some(c);
+                out.push(c);
+            }
+            (_, Some(q)) if c == q => {
+                quote = None;
+                out.push(c);
+            }
+            _ => out.push(c),
+        }
+    }
+    out
+}
+
 pub fn role_for(name: &str) -> Role {
     match name {
         "color"
@@ -142,13 +200,13 @@ pub fn sanitize_stylesheet(css: &str) -> String {
         return String::new();
     };
     let _ = sheet.visit(&mut Sanitizer);
-    sheet.to_css(printer()).map(|r| r.code).unwrap_or_default()
+    sheet_html(&sheet)
 }
 
 pub fn sanitize_style_attr(value: &str) -> Option<String> {
     let mut attr = StyleAttribute::parse(value, parser_options()).ok()?;
     let _ = Sanitizer.visit_declaration_block(&mut attr.declarations);
-    let code = attr.to_css(printer()).ok()?.code;
+    let code = attr_html(&attr)?;
     if code.is_empty() { None } else { Some(code) }
 }
 
@@ -493,7 +551,7 @@ pub fn process_stylesheet(css: &str, mode: Mode) -> SheetResult {
     let mut v = Recolor::new(mode, CANVAS, WHITE, false);
     let _ = sheet.visit(&mut v);
     let css = if mode == Mode::Transform {
-        sheet.to_css(printer()).map(|r| r.code).unwrap_or_default()
+        sheet_html(&sheet)
     } else {
         css.to_string()
     };
@@ -519,5 +577,64 @@ pub fn recolor_style_attr(
     stats.colors_seen += v.stats.colors_seen;
     stats.colors_rewritten += v.stats.colors_rewritten;
     stats.fg_contrast_fixes += v.stats.fg_contrast_fixes;
-    attr.to_css(printer()).ok().map(|r| r.code)
+    attr_html(&attr)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn printed_css_opens_no_markup() {
+        for (printed, inert) in [
+            // Strings: the escape, which means the same character.
+            (r#"a{b:"</style><x>"}"#, r#"a{b:"\3c /style>\3c x>"}"#),
+            (r#"a{b:'<a'}"#, r#"a{b:'\3c a'}"#),
+            // An escaped `<` in an identifier.
+            (r".a\<script{b:c}", r".a\3c script{b:c}"),
+            // Delims: a space after the `<` unless a comparison or a number follows.
+            ("a{b:</style>}", "a{b:< /style>}"),
+            ("a{b:<!--}", "a{b:< !--}"),
+            ("a{b:<?x}", "a{b:< ?x}"),
+            (
+                "@media (width<=600px){a{b:c}}",
+                "@media (width<=600px){a{b:c}}",
+            ),
+            (
+                "@media (400px<width<700px){a{b:c}}",
+                "@media (400px< width<700px){a{b:c}}",
+            ),
+            // A quote inside a string of the other kind, and an escaped quote.
+            (r#"a{b:"'<x",c:<y}"#, r#"a{b:"'\3c x",c:< y}"#),
+            (r#"a{b:"\"<x"}"#, r#"a{b:"\"\3c x"}"#),
+            (r"a{b:c\\}", r"a{b:c\\}"),
+        ] {
+            assert_eq!(html_inert(printed), inert, "{printed}");
+        }
+    }
+
+    #[test]
+    fn escapes_print_inert_in_sheets_and_attributes() {
+        let sheet = sanitize_stylesheet(
+            r#"a{font-family:"\3c/style\3e\3cscript\3e"}b[title="\3c/style\3e"]{color:red}c{--x:"\3c/style\3e"}"#,
+        );
+        assert!(!sheet.contains("</") && !sheet.contains("<s"), "{sheet}");
+        assert!(
+            sheet.contains(r#"font-family:"\3c /style>\3c script>""#),
+            "{sheet}"
+        );
+        let attr = sanitize_style_attr(r#"font-family:"\3cscript\3e""#).expect("kept");
+        assert_eq!(attr, r#"font-family:"\3c script>""#);
+        let dark = process_stylesheet(r#"a{font-family:"\3c/style\3e"}"#, Mode::Transform).css;
+        assert!(!dark.contains("</"), "{dark}");
+        let recolored = recolor_style_attr(
+            r#"font-family:"\3c/style\3e""#,
+            CANVAS,
+            WHITE,
+            false,
+            &mut Stats::default(),
+        )
+        .expect("kept");
+        assert!(!recolored.contains("</"), "{recolored}");
+    }
 }

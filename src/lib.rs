@@ -14,6 +14,7 @@ mod color;
 mod css;
 mod dom;
 mod image;
+mod roundtrip;
 mod sanitize;
 mod text;
 
@@ -145,6 +146,11 @@ fn links_and_hidden(t: &text::TextOut) -> Manifest {
 /// counts come from the text converter run over the sanitized (pre-dark) document, i.e. what the
 /// rendered message shows.
 ///
+/// The finished document is parsed again and must hold exactly the allowlisted elements in the
+/// sanitizer's frame, with no `</` in a `<style>` text. Otherwise it fails closed: the document is
+/// the [`text`] fallback, escaped, its `<body>` marked `data-gx-fallback="text"`, and the manifest
+/// is the fallback's (no images).
+///
 /// # Panics
 /// If `config.resource_scheme` is not `[a-z][a-z0-9+.-]*`.
 pub fn sanitize(input: &str, theme: Theme, cid_ids: Vec<String>, config: &Config) -> Sanitized {
@@ -153,7 +159,7 @@ pub fn sanitize(input: &str, theme: Theme, cid_ids: Vec<String>, config: &Config
         "invalid resource scheme"
     );
     sanitize::begin(config.resource_scheme, cid_ids);
-    let sanitized = sanitize::sanitize(input);
+    let (sanitized, elements) = sanitize::sanitize(input);
     let res = sanitize::finish();
     let mut manifest = links_and_hidden(&text::html_to_text(&sanitized, config.truncated_mark));
     manifest.resource_ids_used = res.cid_used;
@@ -168,7 +174,25 @@ pub fn sanitize(input: &str, theme: Theme, cid_ids: Vec<String>, config: &Config
         })
         .collect();
     manifest.remote_images_dropped = res.remote_dropped;
-    let document = match theme {
+    let document = themed(sanitized, theme);
+    if roundtrip::holds(&elements, &document) {
+        Sanitized { manifest, document }
+    } else {
+        failed_closed(input, theme, config)
+    }
+}
+
+/// What [`sanitize`] returns for a document that fails the output check.
+fn failed_closed(input: &str, theme: Theme, config: &Config) -> Sanitized {
+    let t = text::html_to_text(input, config.truncated_mark);
+    Sanitized {
+        manifest: links_and_hidden(&t),
+        document: themed(sanitize::text_document(&t.text), theme),
+    }
+}
+
+fn themed(sanitized: String, theme: Theme) -> String {
+    match theme {
         Theme::Dark | Theme::DarkStrict => {
             color::STRICT.with(|s| s.set(theme == Theme::DarkStrict));
             let html = dom::process(&sanitized, css::Mode::Transform).html;
@@ -176,8 +200,7 @@ pub fn sanitize(input: &str, theme: Theme, cid_ids: Vec<String>, config: &Config
             html
         }
         Theme::Light => sanitized,
-    };
-    Sanitized { manifest, document }
+    }
 }
 
 /// The plain-text fallback of one HTML part (invalid UTF-8 already replaced by the caller).
@@ -194,6 +217,92 @@ pub fn text(input: &str, config: &Config) -> Text {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    const THEMES: [Theme; 3] = [Theme::Light, Theme::Dark, Theme::DarkStrict];
+
+    /// CSS escapes that lightningcss decodes: printed as is, `</style>` would end the element and
+    /// the rest would be markup the allowlist never saw (fuzz finding of 2026-11-17).
+    #[test]
+    fn css_escapes_cannot_close_a_style_element() {
+        for html in [
+            r#"<style>a{font-family:"\3c/style\3e\3cscript\3e alert(1)\3c/script\3e"}</style><p>x</p>"#,
+            r#"<style>a{font-family:"\3c/style\3e\3ciframe src=https://e.test/\3e\3cmeta http-equiv=refresh content=0;url=https://e.test/\3e\3cimg src=https://e.test/t.png\3e\3c a href=https://e.test/\3e x\3c/a\3e"}</style><p>x</p>"#,
+            r#"<style>a{background:url(data:image/png;base64,\3c/style\3e\3cscript\3ealert\28 1\29\3c/script\3e)}</style><p>x</p>"#,
+            r#"<style>a[title="\3c/style\3e\3cscript\3e"]{color:red}</style><p>x</p>"#,
+            r#"<style>a{--x:"\3c/style\3e\3cscript\3e"}</style><p>x</p>"#,
+            r#"<style>a{x:\3c/style\3e\3cscript\3e}</style><p>x</p>"#,
+            r#"<style>@media (max-width:600px){a{font-family:"\3c/style\3e\3cscript\3e"}}</style><p>x</p>"#,
+            r"<style>.a\3c script{color:red}</style><p>x</p>",
+            r#"<p style='font-family:"\3c/style\3e\3cscript\3e"'>x</p>"#,
+        ] {
+            for theme in THEMES {
+                let d = sanitize(html, theme, vec![], &Config::default()).document;
+                let lower = d.to_ascii_lowercase();
+                for bad in ["<script", "<iframe", "<meta http-equiv", "<img", "<a "] {
+                    assert!(!lower.contains(bad), "{theme:?} {html}: {bad} in {d}");
+                }
+                assert_eq!(
+                    lower.matches("</style").count(),
+                    lower.matches("<style").count(),
+                    "{theme:?} {html}: {d}"
+                );
+                assert!(!d.contains("data-gx-fallback"), "{theme:?} {html}: {d}");
+                assert!(d.ends_with(">x</p></body></html>"), "{theme:?} {html}: {d}");
+            }
+        }
+    }
+
+    #[test]
+    fn schemes_are_read_as_the_browser_reads_them() {
+        let d = sanitize(
+            "<a href='\u{1}data:text/html,x'>a</a><a href=' \tdata:text/html,x'>b</a>\
+             <img src='\u{1}data:image/svg+xml,x'><a href='\u{1}https://e.test/'>c</a>",
+            Theme::Light,
+            vec![],
+            &Config::default(),
+        )
+        .document;
+        assert!(!d.contains("data:"), "{d}");
+        assert!(d.contains("https://e.test/"), "{d}");
+    }
+
+    #[test]
+    fn media_ranges_survive_the_escaping() {
+        let html = "<style>@media (max-width:600px){b{color:red}}@media (400px<width<700px){i{color:red}}</style>";
+        for theme in THEMES {
+            let d = sanitize(html, theme, vec![], &Config::default()).document;
+            assert!(d.contains("@media (width<=600px)"), "{d}");
+            assert!(d.contains("@media (400px< width<700px)"), "{d}");
+        }
+    }
+
+    #[test]
+    fn failing_the_check_gives_the_text_in_the_frame() {
+        let html = "<p>Hi &amp; <b>there</b> <a href='https://e.test/'>e.test</a></p><script>alert(1)</script><p>&lt;script&gt;</p>";
+        for theme in THEMES {
+            let s = failed_closed(html, theme, &Config::default());
+            assert!(
+                s.document.contains(" data-gx-fallback=\"text\""),
+                "{}",
+                s.document
+            );
+            assert!(s.document.contains("Hi &amp; there"), "{}", s.document);
+            assert!(s.document.contains("&lt;script&gt;"), "{}", s.document);
+            assert!(!s.document.to_ascii_lowercase().contains("<script"));
+            assert!(!s.document.contains("<a "));
+            assert!(
+                roundtrip::holds(
+                    &roundtrip::expected("<div style=\"white-space:pre-wrap\">x</div>"),
+                    &s.document
+                ),
+                "{}",
+                s.document
+            );
+            assert_eq!(s.manifest.links.len(), 1);
+            assert_eq!(s.manifest.links[0].href, "https://e.test/");
+            assert!(s.manifest.remote_images.is_empty());
+        }
+    }
 
     #[test]
     fn text_lists_links_with_samples_and_counts_hidden_text() {

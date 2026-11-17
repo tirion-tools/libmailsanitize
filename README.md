@@ -43,6 +43,14 @@ Related projects, and why this crate does not use them:
 - **Allowlist sanitizing** with [ammonia](https://crates.io/crates/ammonia). Tags, attributes and URL schemes are allowlisted.
   Scripts and their content are removed. Every `style` attribute and `<style>` sheet is parsed and re-printed by
   [lightningcss](https://crates.io/crates/lightningcss), so CSS that does not parse is dropped, not passed through.
+  The printed CSS is made inert as HTML before it goes back into the document: no `<` in it is followed by a letter,
+  `/`, `!` or `?`. Inside strings and identifiers it becomes the CSS escape `\3c `; a bare `<` (a media range) gets a
+  space after it.
+- **Output check** (defence in depth): the finished document is parsed again with html5ever and must have the shape the
+  sanitizer meant. That is the frame (`<meta charset>` and `<style>` in the head) around exactly ammonia's elements, in
+  the same order and nesting, with no `</` in any `<style>` text. A document that fails fails closed: `sanitize` returns
+  the text fallback, escaped, in the same frame, its `<body>` marked `data-gx-fallback="text"`. Its manifest is the
+  fallback's, with no images.
 - **Image references**: no image source in the output can reach the network.
   - `cid:` references become `<scheme>://cid-<hash>/`, but only when the caller listed that id.
   - `http(s)` images become placeholders `<scheme>://img-N/`. Their URLs and size hints are listed in the manifest.
@@ -103,7 +111,9 @@ supplies CID parts computes the same id. The value is fixed by a test.
 
   The text converter's cost is linear in its input.
 - **The output contract** is what a consumer may rely on, and what the fuzz target and the corpus test assert:
-  - no `<script` in the document;
+  - no `<script` in the document, and no `</` in a `<style>` text;
+  - the document parses to the allowlisted elements only: no script, frame, plugin, form, `<base>`, `<link>`, SVG or
+    MathML element, no `<meta>` but the frame's `charset`, no `on*` attribute, no `javascript:` URL;
   - every link is http, https or mailto, at most 2048 bytes of printable ASCII;
   - at most 4 text samples per link, each at most 256 characters;
   - every resource id matches `[a-z0-9-]{1,64}`;
@@ -122,12 +132,20 @@ supplies CID parts computes the same id. The value is fixed by a test.
 
 - Unit tests are in `src/`.
 - `tests/corpus.rs` runs every document of the synthetic corpus in `tests/corpus/`:
-  - `hostile/`: a hostile document and a representative one;
+  - `hostile/`: a hostile document, a representative one and the CSS-escape breakouts of MAILSANITIZE-2026-001;
   - `dark-mode/`: 23 dark-mode fixtures and their images;
   - `text-fallback/textgen.py`: writes 34 text-fallback stress documents, up to 4 MiB each.
 
-  Every document goes through every theme and through the text fallback, and the output contract is checked.
-- `fuzz/` holds the cargo-fuzz target `sanitize` and its seed corpus.
+  Every document goes through every theme and through the text fallback. The output contract is checked, and no document
+  may need the fail-closed fallback. The kept fuzz findings (`fuzz/corpus/sanitize/crash-*`: the input and its
+  minimised form) run under every theme.
+- `fuzz/` holds the cargo-fuzz target `sanitize` and its seed corpus. The target parses every sanitized document again with
+  html5ever's own tree (`markup5ever_rcdom`, not the library's) and asserts the output contract on it.
+
+## Advisories
+
+- **MAILSANITIZE-2026-001** (fixed in 0.1.2): allowlist bypass through CSS escapes in `<style>`. See
+  [`docs/advisories/MAILSANITIZE-2026-001.md`](docs/advisories/MAILSANITIZE-2026-001.md).
 
 ## Gates
 

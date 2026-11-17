@@ -609,7 +609,7 @@ dependencies = [
 
 [[package]]
 name = "mailsanitize"
-version = "0.1.0"
+version = "0.1.2"
 dependencies = [
  "ammonia",
  "base64",
@@ -624,8 +624,10 @@ dependencies = [
 name = "mailsanitize-fuzz"
 version = "0.0.0"
 dependencies = [
+ "html5ever",
  "libfuzzer-sys",
  "mailsanitize",
+ "markup5ever_rcdom",
 ]
 
 [[package]]
@@ -643,6 +645,18 @@ dependencies = [
  "log",
  "tendril",
  "web_atoms",
+]
+
+[[package]]
+name = "markup5ever_rcdom"
+version = "0.40.1+unofficial"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "64206f12eb431c03d9b6f293846f8b0517578905b6c0cac266aa52f09c11ad7c"
+dependencies = [
+ "html5ever",
+ "markup5ever",
+ "tendril",
+ "xml5ever",
 ]
 
 [[package]]
@@ -1138,6 +1152,7 @@ dependencies = [
  "parking_lot",
  "phf_shared 0.14.0",
  "precomputed-hash",
+ "serde",
 ]
 
 [[package]]
@@ -1318,6 +1333,16 @@ name = "writeable"
 version = "0.6.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3ad82d2a33cdc9674dc7465672f271e096168fcdbe0f799d9e6db8c5892679dc"
+
+[[package]]
+name = "xml5ever"
+version = "0.40.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "73290529dc9bc6c6155bf77fdd70ce0061f98ad387586aa3104cddab29206961"
+dependencies = [
+ "log",
+ "markup5ever",
+]
 
 [[package]]
 name = "yoke"

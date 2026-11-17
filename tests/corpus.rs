@@ -1,7 +1,8 @@
 //! Every document of the content corpus (`tests/corpus`, plus the generated text-fallback
 //! fixtures when `MAILSANITIZE_EXTRA_CORPUS` names their directory) through `text` and, for valid
-//! UTF-8, `sanitize` under every theme: the output bounds hold, no script survives, and the
-//! result is deterministic.
+//! UTF-8, `sanitize` under every theme: the output bounds hold, no script survives, the output
+//! check holds (no plain-text fallback), and the result is deterministic. The fuzz findings kept in
+//! `fuzz/corpus/sanitize/crash-*` run as the fuzz target runs them.
 use std::path::{Path, PathBuf};
 
 use mailsanitize::{
@@ -71,8 +72,39 @@ fn corpus_documents_keep_the_output_contract() {
                 "{}",
                 f.display()
             );
+            assert!(
+                !a.document.contains("data-gx-fallback"),
+                "{} failed the output check",
+                f.display()
+            );
             let b = sanitize(html, theme, vec![], &cfg);
             assert_eq!(a.document, b.document, "{} not deterministic", f.display());
         }
     }
+}
+
+/// Each kept fuzz finding (`fuzz/corpus/sanitize/crash-*`, the libFuzzer input and its minimised
+/// form) as the fuzz target reads it (the first byte picks the theme, the rest is the part), under
+/// every theme.
+#[test]
+fn fuzz_findings_keep_the_output_contract() {
+    let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("fuzz/corpus/sanitize");
+    let mut n = 0;
+    for e in std::fs::read_dir(&dir).expect("fuzz corpus").flatten() {
+        if !e.file_name().to_string_lossy().starts_with("crash-") {
+            continue;
+        }
+        let data = std::fs::read(e.path()).expect("read");
+        let (_, html) = data.split_first().expect("a selector byte");
+        let html = std::str::from_utf8(html).expect("UTF-8");
+        for theme in [Theme::Light, Theme::Dark, Theme::DarkStrict] {
+            let out = sanitize(html, theme, vec![], &Config::default());
+            check(&out.manifest);
+            let doc = out.document.to_ascii_lowercase();
+            assert!(!doc.contains("<script"), "{}", e.path().display());
+            assert!(!doc.contains("data-gx-fallback"), "{}", e.path().display());
+        }
+        n += 1;
+    }
+    assert!(n >= 2, "fuzz findings missing: {n}");
 }

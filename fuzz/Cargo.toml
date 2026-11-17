@@ -9,8 +9,10 @@ publish = false
 cargo-fuzz = true
 
 [dependencies]
+html5ever = "=0.40.1"
 libfuzzer-sys = "0.4"
 mailsanitize = { path = ".." }
+markup5ever_rcdom = "=0.40.1"
 
 [[bin]]
 name = "sanitize"

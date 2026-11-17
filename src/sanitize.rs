@@ -14,6 +14,7 @@ use lol_html::{RewriteStrSettings, element, rewrite_str, text};
 
 use crate::color::parse_attr_color;
 use crate::css::{sanitize_style_attr, sanitize_stylesheet};
+use crate::text::url_as_parsed;
 
 #[derive(Default)]
 struct Prescan {
@@ -97,18 +98,20 @@ fn builder() -> ammonia::Builder<'static> {
     .url_schemes(HashSet::from(["http", "https", "mailto", "data", "cid"]))
     .link_rel(Some("noopener noreferrer"))
     .attribute_filter(|element, attribute, value| match (element, attribute) {
+        // Schemes are read as the browser reads them (`"\x01data:…"` is a `data:` URL).
         ("img", "src") => {
-            let v = value.trim_start().to_ascii_lowercase();
+            let url = url_as_parsed(value);
+            let v = url.to_ascii_lowercase();
             if v.starts_with("data:image/png;base64,") || v.starts_with("data:image/jpeg;base64,") {
                 Some(Cow::Borrowed(value))
             } else if v.starts_with("cid:") {
-                map_cid(value.trim()).map(Cow::Owned)
+                map_cid(&url).map(Cow::Owned)
             } else {
                 map_remote(value).map(Cow::Owned)
             }
         }
         (_, "href") => {
-            let v = value.trim_start().to_ascii_lowercase();
+            let v = url_as_parsed(value).to_ascii_lowercase();
             (!(v.starts_with("data:") || v.starts_with("cid:"))).then_some(Cow::Borrowed(value))
         }
         (_, "style") => sanitize_style_attr(value).map(Cow::Owned),
@@ -257,7 +260,8 @@ thread_local! {
     static BUILDER: ammonia::Builder<'static> = builder();
 }
 
-pub fn sanitize(input: &str) -> String {
+/// The sanitized document and ammonia's elements (for the output check).
+pub fn sanitize(input: &str) -> (String, crate::roundtrip::Elements) {
     // 1. Pre-scan for document-level presentation that fragment sanitizing would drop.
     let pre = Rc::new(RefCell::new(Prescan::default()));
     let (p1, p2) = (pre.clone(), pre.clone());
@@ -289,8 +293,10 @@ pub fn sanitize(input: &str) -> String {
     );
     let pre = pre.borrow();
 
-    // 2. Allowlist sanitize (style attributes are re-serialised through lightningcss).
+    // 2. Allowlist sanitize (style attributes are re-serialised through lightningcss). The output
+    //    check compares the finished document with these elements.
     let cleaned = BUILDER.with(|b| b.clean(input).to_string());
+    let elements = crate::roundtrip::expected(&cleaned);
 
     // 3. Re-serialise <style> sheets through the CSS sanitizer.
     let buffer = Rc::new(RefCell::new(String::new()));
@@ -324,7 +330,7 @@ pub fn sanitize(input: &str) -> String {
 
     // 4. Rebuild a document; body presentation is re-applied to the new <body> so sender
     //    `body { … }` rules (e.g. in their dark media query) still target the same element.
-    let mut head = String::from("<meta charset=\"utf-8\">");
+    let mut head = String::new();
     if let Some(cs) = &pre.color_scheme
         && cs.to_ascii_lowercase().contains("dark")
     {
@@ -340,20 +346,49 @@ pub fn sanitize(input: &str) -> String {
     if let Some(s) = pre.body_style.as_deref().and_then(sanitize_style_attr) {
         wrapper_style.push_str(&s);
     }
-    let mut wrapper = String::from("<body class=\"gx-body\"");
+    let mut body_attrs = String::from(BODY_CLASS);
     if let Some(c) = pre.body_link.as_deref().and_then(parse_attr_color) {
         head.push_str(&format!(
             "<style>:where(.gx-body) :where(a:link,a:visited){{color:{}}}</style>",
             c.css()
         ));
-        wrapper.push_str(&format!(" data-gx-link=\"{}\"", c.css()));
+        body_attrs.push_str(&format!(" data-gx-link=\"{}\"", c.css()));
     }
     if !wrapper_style.is_empty() {
-        wrapper.push_str(&format!(
+        body_attrs.push_str(&format!(
             " style=\"{}\"",
-            wrapper_style.replace('"', "&quot;")
+            wrapper_style.replace('&', "&amp;").replace('"', "&quot;")
         ));
     }
-    wrapper.push('>');
-    format!("<!DOCTYPE html><html><head>{head}</head>{wrapper}{cleaned}</body></html>")
+    (frame(&head, &body_attrs, &cleaned), elements)
+}
+
+const BODY_CLASS: &str = " class=\"gx-body\"";
+
+/// The document around a body: `head` after the charset, `body_attrs` after `<body`.
+fn frame(head: &str, body_attrs: &str, body: &str) -> String {
+    format!(
+        "<!DOCTYPE html><html><head><meta charset=\"utf-8\">{head}</head><body{body_attrs}>{body}</body></html>"
+    )
+}
+
+/// The plain-text fallback as a document in the same frame, its body marked
+/// `data-gx-fallback="text"`.
+pub fn text_document(text: &str) -> String {
+    let mut body = String::with_capacity(text.len() + 64);
+    body.push_str("<div style=\"white-space:pre-wrap\">");
+    for c in text.chars() {
+        match c {
+            '&' => body.push_str("&amp;"),
+            '<' => body.push_str("&lt;"),
+            '>' => body.push_str("&gt;"),
+            _ => body.push(c),
+        }
+    }
+    body.push_str("</div>");
+    frame(
+        "",
+        &format!("{BODY_CLASS} data-gx-fallback=\"text\""),
+        &body,
+    )
 }

@@ -1,0 +1,17 @@
+<!doctype html>
+<html>
+<head>
+  <base href="file:///home/user/">
+  <meta http-equiv="refresh" content="0;url=https://example.invalid/escape">
+  <style>
+    @import url(https://example.invalid/import.css);
+    body { background-image:/iframe>
+  <object data="httpsN://example.invalid/object"></object>
+  <svg xmlns="http://www.w3.org/2000/svg"><script>alert(1)</script></svg>
+  <a href="javascript:alert(document.cookie)">unsafe link</a>
+  <a href="https://example.com/safe">safe external link</a>
+  <table><tr><td>Malformd table<tr><td>still bounded</table>
+  <!-- deliberately unclosed nesting -->
+  <blockquote><div><p>Quoted content
+</body>
+</html>

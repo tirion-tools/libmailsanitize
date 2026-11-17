@@ -1085,15 +1085,20 @@ pub(crate) enum LinkOut {
     TooLong,
 }
 
+/// A URL attribute as a browser's URL parser reads it: leading and trailing C0 controls and spaces
+/// trimmed, tabs and newlines removed.
+pub(crate) fn url_as_parsed(href: &str) -> String {
+    href.trim_matches(|c: char| c <= ' ')
+        .chars()
+        .filter(|c| !matches!(c, '\t' | '\n' | '\r'))
+        .collect()
+}
+
 /// Link target policy: http, https and mailto only; the listed form is printable ASCII, every
 /// other byte (non-ASCII, space, quotes, controls, bidi controls) percent-encoded, so homoglyph
 /// hosts and RTL overrides cannot disguise it.
 pub(crate) fn link_target(href: &str) -> LinkOut {
-    let cleaned: String = href
-        .trim_matches(|c: char| c <= ' ')
-        .chars()
-        .filter(|c| !matches!(c, '\t' | '\n' | '\r'))
-        .collect();
+    let cleaned = url_as_parsed(href);
     let lower = cleaned.to_ascii_lowercase();
     let scheme_len = if lower.starts_with("https://") {
         8
