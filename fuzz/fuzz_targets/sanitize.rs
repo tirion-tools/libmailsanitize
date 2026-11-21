@@ -8,6 +8,10 @@
 //!   one `<meta>`, the frame's `charset` (no `http-equiv`);
 //! - no `on*` attribute, no `javascript:`, `vbscript:` or `data:` URL (inline images leave as
 //!   `dat-N` resources);
+//! - in every `<style>` text and `style` attribute, outside CSS strings and comments: every
+//!   `url(` names a `mail-resource://` reference, and no image function the URL check cannot
+//!   see (`image-set`, `cross-fade`, `element`, `paint`, `-webkit-canvas`), no `var()`/`env()`
+//!   and no custom property (Graphein security review 2026-11-20 F2);
 //! - the sanitizer's own output check held (no `data-gx-fallback` on `<body>`).
 #![no_main]
 
@@ -121,6 +125,137 @@ fn nodes(root: &Handle) -> Vec<Handle> {
     out
 }
 
+/// A CSS identifier code point (`\` escapes aside).
+fn ident_char(c: char) -> bool {
+    c.is_ascii_alphanumeric() || c == '-' || c == '_' || !c.is_ascii()
+}
+
+/// CSS text, lowercase, without its comments (lightningcss keeps `/*! … */`), and with the
+/// contents of its strings removed (quotes kept), except a string that is a `url(` argument.
+fn outside_strings(css: &str) -> String {
+    let mut out = String::with_capacity(css.len());
+    let mut quote = None;
+    let mut keep = false;
+    let mut chars = css.chars().peekable();
+    while let Some(c) = chars.next() {
+        match (c, quote) {
+            ('\\', _) => {
+                let n = chars.next();
+                if quote.is_none() || keep {
+                    out.push(c);
+                    out.extend(n.map(|n| n.to_ascii_lowercase()));
+                }
+            }
+            ('/', None) if chars.peek() == Some(&'*') => {
+                chars.next();
+                let mut star = false;
+                for n in chars.by_ref() {
+                    if star && n == '/' {
+                        break;
+                    }
+                    star = n == '*';
+                }
+                out.push(' ');
+            }
+            ('"' | '\'', None) => {
+                let t = out.trim_end();
+                keep = t.ends_with("url(")
+                    && !t[..t.len() - 4].chars().next_back().is_some_and(ident_char);
+                quote = Some(c);
+                out.push(c);
+            }
+            (_, Some(q)) if c == q => {
+                quote = None;
+                out.push(c);
+            }
+            (_, Some(_)) if !keep => {}
+            _ => out.push(c.to_ascii_lowercase()),
+        }
+    }
+    out
+}
+
+/// The identifiers of CSS text (as `outside_strings` leaves it) that are followed by `(`, with
+/// the byte offset after the `(`: function names, matched whole, so a longer identifier that
+/// merely contains `url` or `-webkit-canvas` (`\u{fffd}url(`, a browser's function of that name)
+/// is not one of them.
+fn functions(t: &str) -> Vec<(&str, usize)> {
+    let mut out = Vec::new();
+    let mut start = None;
+    let mut escaped = false;
+    for (i, c) in t.char_indices() {
+        if escaped {
+            escaped = false;
+            continue;
+        }
+        if c == '\\' {
+            escaped = true;
+            start.get_or_insert(i);
+        } else if ident_char(c) {
+            start.get_or_insert(i);
+        } else {
+            if let (Some(s), '(') = (start, c) {
+                out.push((&t[s..i], i + 1));
+            }
+            start = None;
+        }
+    }
+    out
+}
+
+/// Printed CSS loads no image but the document's own resources.
+fn check_css(css: &str, sheet: bool) {
+    let t = outside_strings(css);
+    let calls = functions(&t);
+    for (name, _) in &calls {
+        assert!(
+            ![
+                "image-set",
+                "-webkit-image-set",
+                "cross-fade",
+                "-webkit-cross-fade",
+                "element",
+                "-moz-element",
+                "paint",
+                "-webkit-canvas",
+                "var",
+                "env",
+            ]
+            .contains(name),
+            "{name}() in CSS: {css}"
+        );
+    }
+    // A custom property: `--` starting a declaration (a selector may be an identifier `--x`).
+    let mut blocks = vec![!sheet];
+    let mut prelude = 0;
+    for (i, c) in t.char_indices() {
+        match c {
+            '{' => {
+                blocks.push(!t[prelude..i].trim_start().starts_with('@'));
+                prelude = i + 1;
+            }
+            '}' => {
+                blocks.pop();
+                prelude = i + 1;
+            }
+            ';' => prelude = i + 1,
+            '-' if blocks.last() == Some(&true) => {
+                assert!(
+                    !(t[i..].starts_with("--") && t[prelude..i].trim().is_empty()),
+                    "custom property in CSS: {css}"
+                );
+            }
+            _ => {}
+        }
+    }
+    for (name, after) in calls {
+        if name == "url" {
+            let rest = t[after..].trim_start().trim_start_matches(['"', '\'']);
+            assert!(rest.starts_with("mail-resource://"), "url( in CSS: {css}");
+        }
+    }
+}
+
 fn check_document(doc: &str) {
     let dom = parse_document(RcDom::default(), ParseOpts::default()).one(doc);
     let mut metas = 0;
@@ -153,9 +288,13 @@ fn check_document(doc: &str) {
                 })
                 .collect();
             assert!(!text.contains("</"), "</ in a <style>: {text}");
+            check_css(&text, true);
         }
         for a in attrs.iter() {
             let attr = (*a.name.local).to_ascii_lowercase();
+            if attr == "style" {
+                check_css(&a.value, false);
+            }
             assert!(!attr.starts_with("on"), "{attr} attribute on <{tag}>");
             if URL_ATTRIBUTES.contains(&attr.as_str()) {
                 let url = url_start(&a.value);

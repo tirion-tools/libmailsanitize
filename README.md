@@ -17,7 +17,11 @@ This crate is glue around existing libraries; it does not replace them, and fixe
 - **[lightningcss](https://crates.io/crates/lightningcss)** parses and re-prints all CSS. Ammonia does not parse CSS
   values; this crate adds the CSS allowlist as a lightningcss visitor. Only style and `@media` rules are kept. The
   properties `position`, `z-index`, `content`, `behavior`, `cursor`, `animation*` and `transition*` are dropped, and so
-  is every `url()` except inline PNG/JPEG, which becomes a resource reference like an `<img>` source.
+  is every `url()` except inline PNG/JPEG, which becomes a resource reference like an `<img>` source. A declaration is
+  also dropped when it holds an image source the URL check cannot see: any `image-set()` (lightningcss's visitor skips
+  its images, and its sources may be strings), `cross-fade()`, `element()`, `paint()`; any custom property (`--x`) and
+  any `var()` or `env()` (substituted after sanitizing); and, in a value lightningcss keeps as raw tokens, any string or
+  raw URL token.
 - **[html5ever](https://crates.io/crates/html5ever)**'s tokenizer drives the text fallback; **[lol_html](https://crates.io/crates/lol_html)**
   does the streaming rewrites (pre-scan, dark transform); **[palette](https://crates.io/crates/palette)** does the colour
   maths.
@@ -58,7 +62,8 @@ Related projects, and why this crate does not use them:
 - **Image references**: no image source in the output can reach the network.
   - `cid:` references become `<scheme>://cid-<hash>/`, but only when the caller listed that id.
   - `http(s)` images become placeholders `<scheme>://img-N/`. Their URLs and size hints are listed in the manifest.
-  - Inline PNG and JPEG `data:` URLs are kept.
+  - Inline PNG and JPEG `data:` URLs (`<img src>` and CSS `url()`) become `<scheme>://dat-N/`; their decoded bytes are in
+    the manifest.
   - Every other source is dropped.
 
   The caller resolves the ids (for example, after the user asks to load remote images).
@@ -123,7 +128,9 @@ supplies CID parts computes the same id. The value is fixed by a test.
 - **The output contract** is what a consumer may rely on, and what the fuzz target and the corpus test assert:
   - no `<script` in the document, and no `</` in a `<style>` text;
   - the document parses to the allowlisted elements only: no script, frame, plugin, form, `<base>`, `<link>`, SVG or
-    MathML element, no `<meta>` but the frame's `charset`, no `on*` attribute, no `javascript:` URL;
+    MathML element, no `<meta>` but the frame's `charset`, no `on*` attribute, no `javascript:` or `data:` URL;
+  - in CSS (sheets and `style` attributes, outside strings), every `url()` is a `<scheme>://` reference, and there is no
+    `image-set()`, `cross-fade()`, `element()`, `paint()`, `var()`, `env()` or custom property;
   - every link is http, https or mailto, at most 2048 bytes of printable ASCII; every visible `<a href>` within the
     1 MiB of body text is listed (http(s) in the WHATWG form the document carries, then percent-encoded as above);
   - at most 4 text samples per link, each at most 256 characters;

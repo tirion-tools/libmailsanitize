@@ -5,10 +5,12 @@ use std::convert::Infallible;
 
 use lightningcss::declaration::DeclarationBlock;
 use lightningcss::properties::Property;
+use lightningcss::properties::custom::{CustomPropertyName, Token, TokenList, TokenOrValue};
 use lightningcss::rules::{CssRule, CssRuleList};
 use lightningcss::stylesheet::{ParserOptions, PrinterOptions, StyleAttribute, StyleSheet};
 use lightningcss::traits::{Parse, ToCss};
 use lightningcss::values::color::{CssColor, RGBA};
+use lightningcss::values::image::Image;
 use lightningcss::values::url::Url;
 use lightningcss::visit_types;
 use lightningcss::visitor::{Visit, VisitTypes, Visitor};
@@ -144,7 +146,9 @@ const DENIED_PROPERTIES: &[&str] = &[
 ];
 
 /// Rewrites inline image URLs to their resource reference (`crate::sanitize::map_css_url`) and
-/// flags any other URL.
+/// flags any other URL, and every `image-set()`: lightningcss's visitor skips the images of an
+/// image set, so neither its `url()` nor its string sources (`image-set("data:…" 1x)`) would be
+/// checked.
 struct UrlCheck {
     unsafe_url: bool,
 }
@@ -152,7 +156,7 @@ struct UrlCheck {
 impl<'i> Visitor<'i> for UrlCheck {
     type Error = Infallible;
     fn visit_types(&self) -> VisitTypes {
-        visit_types!(URLS)
+        visit_types!(URLS | IMAGES)
     }
     fn visit_url(&mut self, url: &mut Url<'i>) -> Result<(), Self::Error> {
         match crate::sanitize::map_css_url(&url.url) {
@@ -161,6 +165,47 @@ impl<'i> Visitor<'i> for UrlCheck {
         }
         Ok(())
     }
+    fn visit_image(&mut self, image: &mut Image<'i>) -> Result<(), Self::Error> {
+        if matches!(image, Image::ImageSet(_)) {
+            self.unsafe_url = true;
+            return Ok(());
+        }
+        image.visit_children(self)
+    }
+}
+
+/// Functions whose arguments a browser reads as images, strings included (`image-set("…")`), or
+/// that paint something other than an image URL.
+const IMAGE_FUNCTIONS: &[&str] = &[
+    "image-set",
+    "-webkit-image-set",
+    "cross-fade",
+    "-webkit-cross-fade",
+    "image",
+    "element",
+    "-moz-element",
+    "paint",
+    "-webkit-canvas",
+];
+
+/// A token list (an unparsed or unknown property's value) that could load an image the URL check
+/// never sees: a string token (an image source inside `image-set()`), a raw or unparsed URL token,
+/// an image function, or a `var()`/`env()` (whose value is substituted after sanitizing).
+fn risky_tokens(tokens: &TokenList) -> bool {
+    tokens.0.iter().any(|t| match t {
+        TokenOrValue::Token(
+            Token::String(_) | Token::UnquotedUrl(_) | Token::BadUrl(_) | Token::Function(_),
+        )
+        | TokenOrValue::Var(_)
+        | TokenOrValue::Env(_) => true,
+        TokenOrValue::Function(f) => {
+            IMAGE_FUNCTIONS
+                .iter()
+                .any(|n| f.name.0.eq_ignore_ascii_case(n))
+                || risky_tokens(&f.arguments)
+        }
+        _ => false,
+    })
 }
 
 fn property_allowed(p: &mut Property) -> bool {
@@ -168,6 +213,21 @@ fn property_allowed(p: &mut Property) -> bool {
     let name = id.name();
     if DENIED_PROPERTIES.iter().any(|d| name.starts_with(d)) {
         return false;
+    }
+    // Custom properties (`--x`) only matter through var(), which is dropped below; dropping both
+    // keeps a value from reaching an image property after the URL check (image-set strings).
+    match p {
+        Property::Custom(c) => {
+            if matches!(c.name, CustomPropertyName::Custom(_)) || risky_tokens(&c.value) {
+                return false;
+            }
+        }
+        Property::Unparsed(u) => {
+            if risky_tokens(&u.value) {
+                return false;
+            }
+        }
+        _ => {}
     }
     let mut check = UrlCheck { unsafe_url: false };
     let _ = p.visit(&mut check);

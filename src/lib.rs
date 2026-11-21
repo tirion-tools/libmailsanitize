@@ -477,6 +477,78 @@ mod tests {
         }
     }
 
+    /// Image sources the URL check never saw (Graphein security review 2026-11-20 F2): strings in
+    /// `image-set()` (lightningcss keeps them as tokens, and its visitor skips image-set images),
+    /// carried through custom properties and `var()`, reached a printed document's image decoders.
+    #[test]
+    fn css_image_sources_the_url_check_cannot_see_are_dropped() {
+        let webp = "data:image/webp;base64,UklGRg==";
+        let png = format!("data:image/png;base64,{PNG_B64}");
+        for css in [
+            format!("background-image:image-set(\"{webp}\" 1x)"),
+            format!("background-image:-webkit-image-set(\"{webp}\" 1x)"),
+            format!("background-image:image-set(url({webp}) 1x)"),
+            format!("background-image:image-set(\"{png}\" 1x)"),
+            format!("background-image:var(--x,image-set(\"{webp}\" 1x))"),
+            format!("background:#fff var(--x,url({webp}))"),
+            format!("--a:image-set(\"{webp}\" 1x)"),
+            format!("--a:\"{webp}\""),
+            "--a:red".to_string(),
+            "background-image:var(--a)".to_string(),
+            "color:env(--a)".to_string(),
+            format!("background:cross-fade(url(a.png),image-set(\"{webp}\" 1x),50%)"),
+            format!("list-style-image:-webkit-image-set(\"{webp}\" 1x)"),
+            format!("border-image-source:image-set(\"{webp}\" 1x)"),
+            format!("x-unknown:\"{webp}\""),
+            "mask-image:element(#a)".to_string(),
+        ] {
+            for html in [
+                format!("<p style='{css}'>x</p>"),
+                format!("<style>p{{{css}}}</style><p>x</p>"),
+                format!("<style>@media screen{{p{{{css}}}}}</style><p>x</p>"),
+            ] {
+                for images in [Images::Resources, Images::Off] {
+                    let cfg = Config {
+                        images,
+                        ..Config::default()
+                    };
+                    let d = sanitize(&html, Theme::Light, vec![], &cfg).document;
+                    for bad in [
+                        "data:",
+                        "image-set",
+                        "cross-fade",
+                        "element(",
+                        "var(",
+                        "env(",
+                        "--a",
+                        "UklGR",
+                    ] {
+                        assert!(!d.contains(bad), "{html}: {bad} in {d}");
+                    }
+                    assert!(d.ends_with(">x</p></body></html>"), "{html}: {d}");
+                }
+            }
+        }
+        // What the URL check does see stays as it was.
+        let s = sanitize(
+            &format!(
+                "<p style='color:red;font-family:\"Arial\";background:url({png})'>x</p>\
+                 <p style='background-image:linear-gradient(red,blue)'>y</p>"
+            ),
+            Theme::Light,
+            vec![],
+            &Config::default(),
+        );
+        assert!(s.document.contains("color:red"), "{}", s.document);
+        assert!(s.document.contains("Arial"), "{}", s.document);
+        assert!(
+            s.document.contains("mail-resource://dat-0/"),
+            "{}",
+            s.document
+        );
+        assert!(s.document.contains("linear-gradient"), "{}", s.document);
+    }
+
     // 1x1 transparent PNG.
     const PNG_B64: &str = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAAC0lEQVR42mNgAAIAAAUAAen63NgAAAAASUVORK5CYII=";
 
