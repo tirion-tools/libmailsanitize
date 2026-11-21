@@ -609,7 +609,7 @@ dependencies = [
 
 [[package]]
 name = "mailsanitize"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "ammonia",
  "base64",
@@ -618,6 +618,7 @@ dependencies = [
  "lol_html",
  "palette",
  "png",
+ "url",
 ]
 
 [[package]]

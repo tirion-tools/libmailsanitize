@@ -62,6 +62,12 @@ Related projects, and why this crate does not use them:
   - Every other source is dropped.
 
   The caller resolves the ids (for example, after the user asks to load remote images).
+- **Links**: every kept `href` is clickable only if the manifest can list it.
+  - `http(s)` targets are rewritten to their WHATWG serialisation (the [url](https://crates.io/crates/url) crate, the
+    parser ammonia uses), which is the URL a browser reports when the link is clicked: dot segments resolved, `\` read as
+    `/`, default ports dropped, unsafe bytes percent-encoded. One that does not parse is dropped.
+  - A link whose listed form is over 2048 bytes, and every new distinct link after the first 256, loses its `href`, so
+    the anchor is inert rather than clickable but missing from the manifest.
 - **Dark policy v1** (`Theme::Dark`, `Theme::DarkStrict`). Light backgrounds are darkened, and text and borders are
   re-coloured to reach contrast targets in OKLCH. Brand fills and surfaces the sender already made dark are kept.
   Low-contrast images get a backing.
@@ -118,7 +124,8 @@ supplies CID parts computes the same id. The value is fixed by a test.
   - no `<script` in the document, and no `</` in a `<style>` text;
   - the document parses to the allowlisted elements only: no script, frame, plugin, form, `<base>`, `<link>`, SVG or
     MathML element, no `<meta>` but the frame's `charset`, no `on*` attribute, no `javascript:` URL;
-  - every link is http, https or mailto, at most 2048 bytes of printable ASCII;
+  - every link is http, https or mailto, at most 2048 bytes of printable ASCII; every visible `<a href>` within the
+    1 MiB of body text is listed (http(s) in the WHATWG form the document carries, then percent-encoded as above);
   - at most 4 text samples per link, each at most 256 characters;
   - every resource id matches `[a-z0-9-]{1,64}`;
   - remote image URLs are http(s);

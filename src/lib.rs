@@ -403,6 +403,80 @@ mod tests {
         assert!(valid_resource_id(&s.manifest.resource_ids_used[0]));
     }
 
+    /// The renderer reports a click in its WHATWG form; the manifest must list that same form, or
+    /// the caller cannot find the link text for the click-time check (Graphein F1, 2026-11-20).
+    #[test]
+    fn kept_hrefs_are_the_urls_a_click_reports() {
+        let s = sanitize(
+            "<a href='https://evil.example/x/../login'>www.mybank-portal.example</a>\
+             <a href='HTTPS://Evil.Example:443/a/%2e%2E/b?q=a b#f'>two</a>\
+             <a href='http:\\\\evil.example\\c\\.\\d'>three</a>\
+             <a href='https://[x/'>broken</a>",
+            Theme::Light,
+            vec![],
+            &Config::default(),
+        );
+        let d = &s.document;
+        assert!(d.contains("href=\"https://evil.example/login\""), "{d}");
+        assert!(
+            d.contains("href=\"https://evil.example/b?q=a%20b#f\""),
+            "{d}"
+        );
+        assert!(d.contains("href=\"http://evil.example/c/d\""), "{d}");
+        assert!(!d.contains(".."), "{d}");
+        assert!(!d.contains("[x"), "{d}");
+        let hrefs: Vec<_> = s.manifest.links.iter().map(|l| l.href.as_str()).collect();
+        assert_eq!(
+            hrefs,
+            [
+                "https://evil.example/login",
+                "https://evil.example/b?q=a%20b#f",
+                "http://evil.example/c/d"
+            ]
+        );
+        assert_eq!(
+            s.manifest.links[0].text_samples,
+            vec!["www.mybank-portal.example"]
+        );
+    }
+
+    /// A link the manifest cannot list (over MAX_URL, or beyond MAX_LINKS distinct links) is
+    /// inert, not clickable but unlisted (Graphein F1 variants A and B).
+    #[test]
+    fn links_the_manifest_cannot_list_are_inert() {
+        let long = format!(
+            "<a href='https://evil.example/login?{}'>www.mybank-portal.example</a>",
+            "a".repeat(MAX_URL)
+        );
+        let s = sanitize(&long, Theme::Light, vec![], &Config::default());
+        assert!(!s.document.contains("href"), "{}", s.document);
+        assert!(s.manifest.links.is_empty());
+
+        let mut html: String = (0..MAX_LINKS)
+            .map(|i| format!("<a href='https://pad.example/{i}'>pad {i}</a> "))
+            .collect();
+        html.push_str("<a href='https://pad.example/0'>again</a>");
+        html.push_str("<a href='https://evil.example/login'>www.paypal.com</a>");
+        html.push_str("<a href='mailto:x@evil.example'>mail</a>");
+        for theme in THEMES {
+            let s = sanitize(&html, theme, vec![], &Config::default());
+            assert!(!s.document.contains("evil.example"), "{theme:?}");
+            assert_eq!(
+                s.document.matches("href=\"https://pad.example/0\"").count(),
+                2
+            );
+            assert!(s.document.contains("www.paypal.com"));
+            assert_eq!(s.manifest.links.len(), MAX_LINKS);
+            assert_eq!(s.manifest.links[0].text_samples, vec!["pad 0", "again"]);
+            assert!(
+                s.manifest
+                    .links
+                    .iter()
+                    .all(|l| l.href.starts_with("https://pad.example/"))
+            );
+        }
+    }
+
     // 1x1 transparent PNG.
     const PNG_B64: &str = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAAC0lEQVR42mNgAAIAAAUAAen63NgAAAAASUVORK5CYII=";
 

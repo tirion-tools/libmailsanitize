@@ -118,10 +118,7 @@ fn builder() -> ammonia::Builder<'static> {
                 map_remote(value).map(Cow::Owned)
             }
         }
-        (_, "href") => {
-            let v = url_as_parsed(value).to_ascii_lowercase();
-            (!(v.starts_with("data:") || v.starts_with("cid:"))).then_some(Cow::Borrowed(value))
-        }
+        (_, "href") => map_href(value).map(Cow::Owned),
         (_, "style") => sanitize_style_attr(value).map(Cow::Owned),
         _ => Some(Cow::Borrowed(value)),
     });
@@ -174,6 +171,9 @@ pub struct Resources {
     pub inline_bytes: usize,
     pub inline_dropped: u32,
     pub images_off: bool,
+    /// The listed form ([`crate::text::link_target`]) of every distinct link the document keeps;
+    /// at most [`crate::MAX_LINKS`].
+    pub links: HashSet<String>,
 }
 
 thread_local! {
@@ -340,6 +340,48 @@ fn map_remote(value: &str) -> Option<String> {
                 None
             }
         }
+    })
+}
+
+/// A kept link target, or None (the href is dropped and the anchor is inert):
+/// - http(s): rewritten to its WHATWG serialisation (the URL the renderer reports when it is
+///   clicked, so the manifest lists the same link the caller is asked to open); an href that does
+///   not parse is dropped;
+/// - mailto: kept as written;
+/// - `data:` and `cid:`: dropped;
+/// - other schemes: ammonia's scheme allowlist has already dropped them; relative references pass.
+///
+/// Every kept http(s) and mailto link is in the manifest when it is visible: one whose listed form
+/// is over [`crate::MAX_URL`] bytes, or a new distinct link beyond [`crate::MAX_LINKS`], is
+/// dropped instead of staying clickable but unlisted.
+fn map_href(value: &str) -> Option<String> {
+    let lower = url_as_parsed(value).to_ascii_lowercase();
+    if lower.starts_with("data:") || lower.starts_with("cid:") {
+        return None;
+    }
+    let href = if lower.starts_with("http:") || lower.starts_with("https:") {
+        let u = url::Url::parse(value).ok()?;
+        if !matches!(u.scheme(), "http" | "https") {
+            return None;
+        }
+        String::from(u)
+    } else if lower.starts_with("mailto:") {
+        value.to_string()
+    } else {
+        return Some(value.to_string());
+    };
+    let crate::text::LinkOut::Url(listed) = crate::text::link_target(&href) else {
+        return None;
+    };
+    RESOURCES.with(|r| {
+        let mut r = r.borrow_mut();
+        if !r.links.contains(&listed) {
+            if r.links.len() >= crate::MAX_LINKS {
+                return None;
+            }
+            r.links.insert(listed);
+        }
+        Some(href)
     })
 }
 
