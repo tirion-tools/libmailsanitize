@@ -88,6 +88,27 @@ fn corpus_documents_keep_the_output_contract() {
     }
 }
 
+/// `dark-mode/25-flattened-nested-rule.html`: the declarations of a nested rule flattened into the
+/// cells' style attributes (braces lost) reach neither the document nor the hidden-text counts,
+/// and the cells' own declarations before it are kept.
+#[test]
+fn a_flattened_nested_rule_leaves_the_cells_visible() {
+    let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/corpus/dark-mode/25-flattened-nested-rule.html");
+    let html = std::fs::read_to_string(path).expect("read");
+    let cfg = Config::default();
+    for theme in [Theme::Light, Theme::Dark, Theme::DarkStrict] {
+        let out = sanitize(&html, theme, vec![], &cfg);
+        assert!(!out.document.contains("opacity"), "{theme:?}");
+        assert!(!out.document.contains("left:-40px"), "{theme:?}");
+        assert!(out.document.contains("border-left:3px solid"), "{theme:?}");
+        assert!(out.manifest.hidden.is_empty(), "{theme:?}");
+    }
+    let t = text(&html, &cfg);
+    assert!(t.manifest.hidden.is_empty(), "{:?}", t.manifest.hidden);
+    assert!(t.text.contains("Library extends weekend opening hours"));
+}
+
 /// Each kept fuzz finding (`fuzz/corpus/sanitize/crash-*`, the libFuzzer input and its minimised
 /// form) as the fuzz target reads it (the first byte picks the theme, the rest is the part), under
 /// every theme.

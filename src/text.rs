@@ -23,6 +23,7 @@ use html5ever::tokenizer::{
 };
 
 use crate::color::{Rgb, contrast};
+use crate::css::without_nested_rule;
 
 /// Body text cap in bytes (the footnote list is bounded separately by MAX_LINKS × MAX_URL).
 pub const TEXT_CAP: usize = 1 << 20;
@@ -1505,7 +1506,10 @@ impl State {
             attr_bg = Some(Bg::Image);
         }
         if let Some(style) = attr(tag, "style") {
-            d.apply(&declarations(style, MAX_STYLE_SCAN), false);
+            d.apply(
+                &declarations(without_nested_rule(style), MAX_STYLE_SCAN),
+                false,
+            );
         }
         // Font size, colours, background.
         if let Some(px) = d.font.as_deref().and_then(|f| font_size(f, parent.font_px)) {
@@ -2142,4 +2146,23 @@ pub fn html_to_text(input: &str, truncated_mark: &str) -> TextOut {
     let Sink { st } = tok.sink;
     let st = st.into_inner();
     st.finish(truncated_mark)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The text model agrees with the sanitized document: the declarations of a nested rule
+    /// flattened into a style attribute (braces lost) do not apply to the element.
+    #[test]
+    fn a_flattened_nested_rule_does_not_hide_the_cell_text() {
+        let html = "<table><tr><td style=\"padding:0px; position: relative; &: :before \
+            position:absolute; background: #8a5db5 color: white; display: block; top: 0; \
+            left: -40px; opacity: 0;\">Visible cell text</td></tr></table>\
+            <p style=\"color:red; opacity:0\">Hidden text</p>";
+        let t = html_to_text(html, "");
+        assert!(t.text.contains("Visible cell text"), "{}", t.text);
+        assert!(!t.text.contains("Hidden text"), "{}", t.text);
+        assert_eq!(t.hidden, vec![(Hidden::Opacity, 10)], "{:?}", t.hidden);
+    }
 }

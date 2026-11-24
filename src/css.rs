@@ -265,8 +265,57 @@ pub fn sanitize_stylesheet(css: &str) -> String {
     sheet_html(&sheet)
 }
 
+/// The part of a `style` attribute value before its first declaration whose name starts with `&`
+/// (the CSS nesting selector). Style attributes cannot hold nested rules: a browser drops
+/// `&::before{...}` whole when its braces survive. Templates that flatten SCSS sometimes lose the
+/// braces (`&: :before position:absolute; ...; opacity:0;`), and then nothing marks where the
+/// nested rule ends, so its declarations would land on the element itself (`display:block;
+/// opacity:0` meant for `::before` hid a newsletter's table cells). Such a declaration therefore
+/// ends the attribute: it and every declaration after it are dropped. Quotes, brackets, comments
+/// and backslash escapes are respected, so a `&` inside a value (a URL, a string) changes nothing.
+/// Every path that reads a raw style attribute goes through this.
+pub fn without_nested_rule(value: &str) -> &str {
+    let b = value.as_bytes();
+    let (mut i, mut depth, mut at_start) = (0, 0usize, true);
+    while i < b.len() {
+        match b[i] {
+            b'/' if b.get(i + 1) == Some(&b'*') => {
+                i = value[i + 2..].find("*/").map_or(b.len(), |e| i + 2 + e + 2);
+                continue;
+            }
+            c if c.is_ascii_whitespace() => {}
+            b'&' if at_start => return &value[..i],
+            b'\\' => {
+                at_start = false;
+                i += 2;
+                continue;
+            }
+            q @ (b'"' | b'\'') => {
+                at_start = false;
+                i += 1;
+                // A string ends at its closing quote or, unclosed, at a newline.
+                while i < b.len() && b[i] != q && b[i] != b'\n' {
+                    i += if b[i] == b'\\' { 2 } else { 1 };
+                }
+            }
+            b'(' | b'[' | b'{' => {
+                at_start = false;
+                depth += 1;
+            }
+            b')' | b']' | b'}' => {
+                at_start = false;
+                depth = depth.saturating_sub(1);
+            }
+            b';' => at_start = depth == 0,
+            _ => at_start = false,
+        }
+        i += 1;
+    }
+    value
+}
+
 pub fn sanitize_style_attr(value: &str) -> Option<String> {
-    let mut attr = StyleAttribute::parse(value, parser_options()).ok()?;
+    let mut attr = StyleAttribute::parse(without_nested_rule(value), parser_options()).ok()?;
     let _ = Sanitizer.visit_declaration_block(&mut attr.declarations);
     let code = attr_html(&attr)?;
     if code.is_empty() { None } else { Some(code) }
@@ -698,5 +747,62 @@ mod tests {
         )
         .expect("kept");
         assert!(!recolored.contains("</"), "{recolored}");
+    }
+
+    /// A nested rule flattened with its braces lost (`&::before{...}` from SCSS).
+    const FLATTENED: &str = "padding:0px; border:1px solid #ccc; position: relative; &: :before \
+        position:absolute; background: #8a5db5 color: white; display: block; top: 0; bottom: 0; \
+        right: 100%; left: -40px; opacity: 0;";
+
+    #[test]
+    fn a_flattened_nested_rule_ends_the_style_attribute() {
+        let s = sanitize_style_attr(FLATTENED).expect("kept");
+        for kept in ["padding:0", "border:1px solid #ccc"] {
+            assert!(s.contains(kept), "{kept}: {s}");
+        }
+        for gone in ["display", "opacity", "left", "absolute", "background", "&"] {
+            assert!(!s.contains(gone), "{gone}: {s}");
+        }
+        // Only `&` at the start of a declaration counts, after whitespace or comments.
+        assert_eq!(
+            without_nested_rule("color:red;/* x */ &.a{x:y}"),
+            "color:red;/* x */ "
+        );
+        assert_eq!(without_nested_rule("&:hover{color:red}"), "");
+        assert_eq!(without_nested_rule("color:red;;\n&"), "color:red;;\n");
+    }
+
+    #[test]
+    fn an_ampersand_inside_a_value_does_not_end_the_style_attribute() {
+        for value in [
+            r#"font-family:"a;&b"; opacity:0"#,
+            "font-family:'a;&b'; opacity:0",
+            r#"font-family:"a\";&b"; opacity:0"#,
+            "background:url(https://e.test/a?b=1;&c=2); opacity:0",
+            "background:url('https://e.test/a?b=1;&c=2'); opacity:0",
+            "color:red/*;&x:y*/; opacity:0",
+            r"font-family:a\;&b; opacity:0",
+            "--x:[;&y]; opacity:0",
+            "--x:a & b; opacity:0",
+        ] {
+            assert_eq!(without_nested_rule(value), value);
+        }
+        let s = sanitize_style_attr("background:url(https://e.test/a?b=1;&c=2); opacity:0")
+            .expect("kept");
+        assert!(s.contains("opacity:0"), "{s}");
+    }
+
+    /// With its braces intact a nested rule gives the element none of its declarations
+    /// (lightningcss alone drops the rule whole, as a browser does); like the flattened form, it
+    /// ends the attribute.
+    #[test]
+    fn a_nested_rule_with_braces_does_not_style_the_element() {
+        for value in [
+            "padding:1px; &::before{opacity:0; display:block}",
+            "padding:1px; &::before{opacity:0; display:block}; color:red",
+        ] {
+            let s = sanitize_style_attr(value).expect("kept");
+            assert_eq!(s, "padding:1px", "{value}");
+        }
     }
 }

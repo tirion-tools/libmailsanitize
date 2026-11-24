@@ -51,6 +51,9 @@ Related projects, and why this crate does not use them:
 - **Allowlist sanitizing** with [ammonia](https://crates.io/crates/ammonia). Tags, attributes and URL schemes are allowlisted.
   Scripts and their content are removed. Every `style` attribute and `<style>` sheet is parsed and re-printed by
   [lightningcss](https://crates.io/crates/lightningcss), so CSS that does not parse is dropped, not passed through.
+  A `style` attribute ends at its first declaration whose name starts with `&` (a nested rule such as `&::before{…}`,
+  often flattened with its braces lost): attributes cannot hold nested rules, and without braces nothing marks where
+  the rule ends, so its declarations would land on the element itself. The text fallback reads attributes the same way.
   The printed CSS is made inert as HTML before it goes back into the document: no `<` in it is followed by a letter,
   `/`, `!` or `?`. Inside strings and identifiers it becomes the CSS escape `\3c `; a bare `<` (a media range) gets a
   space after it.
@@ -153,7 +156,8 @@ supplies CID parts computes the same id. The value is fixed by a test.
 - Unit tests are in `src/`.
 - `tests/corpus.rs` runs every document of the synthetic corpus in `tests/corpus/`:
   - `hostile/`: a hostile document, a representative one and the CSS-escape breakouts of MAILSANITIZE-2026-001;
-  - `dark-mode/`: 24 dark-mode fixtures and their images (24: an HTML-only notice whose link texts span source lines);
+  - `dark-mode/`: 25 dark-mode fixtures and their images (24: an HTML-only notice whose link texts span source lines;
+    25: newsletter cells whose style attributes carry a nested rule flattened with its braces lost);
   - `text-fallback/textgen.py`: writes 34 text-fallback stress documents, up to 4 MiB each.
 
   Every document goes through every theme and through the text fallback. The output contract is checked, and no document
