@@ -133,7 +133,9 @@ supplies CID parts computes the same id. The value is fixed by a test.
     `image-set()`, `cross-fade()`, `element()`, `paint()`, `var()`, `env()` or custom property;
   - every link is http, https or mailto, at most 2048 bytes of printable ASCII; every visible `<a href>` within the
     1 MiB of body text is listed (http(s) in the WHATWG form the document carries, then percent-encoded as above);
-  - at most 4 text samples per link, each at most 256 characters;
+  - at most 4 text samples per link, each the one-line text the reader sees: whitespace collapsed, no leading or
+    trailing space, no control, line break, tab, bidi control or invisible character, at most 256 characters
+    (`valid_link_sample`);
   - every resource id matches `[a-z0-9-]{1,64}`;
   - remote image URLs are http(s);
   - the text contains no bidi controls, zero-width characters or control characters other than `\n` and `\t`.
@@ -151,7 +153,7 @@ supplies CID parts computes the same id. The value is fixed by a test.
 - Unit tests are in `src/`.
 - `tests/corpus.rs` runs every document of the synthetic corpus in `tests/corpus/`:
   - `hostile/`: a hostile document, a representative one and the CSS-escape breakouts of MAILSANITIZE-2026-001;
-  - `dark-mode/`: 23 dark-mode fixtures and their images;
+  - `dark-mode/`: 24 dark-mode fixtures and their images (24: an HTML-only notice whose link texts span source lines);
   - `text-fallback/textgen.py`: writes 34 text-fallback stress documents, up to 4 MiB each.
 
   Every document goes through every theme and through the text fallback. The output contract is checked, and no document

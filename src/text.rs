@@ -113,6 +113,10 @@ pub enum Hidden {
 
 /// Most visible-text samples kept per listed link (manifest `ManifestLink.text_samples`).
 pub const MAX_SAMPLES: usize = 4;
+/// Most characters of one link text sample.
+pub const MAX_SAMPLE_CHARS: usize = 256;
+/// Most bytes of an anchor's source text kept for its sample, before the character policy.
+const MAX_SAMPLE_SOURCE: usize = 4096;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum Kind {
@@ -1375,6 +1379,7 @@ impl State {
             )
         };
         let Some(url) = url else { return };
+        let sample = sample_text(&sample);
         // A link with nothing visible inside (hidden text, no image) is not listed: the reader of
         // the rendered message could not see or click it either.
         if hidden || (self.out.content_chars == start && !has_image) {
@@ -1857,11 +1862,59 @@ pub struct Link {
 
 fn push_sample(sample: &mut String, t: &str) {
     for c in t.chars() {
-        if sample.len() >= 256 {
+        if sample.len() + c.len_utf8() > MAX_SAMPLE_SOURCE {
             return;
         }
         sample.push(c);
     }
+}
+
+/// A link's text as the reader sees it: the body text's character policy and whitespace
+/// collapsing (no controls, bidi controls or invisible characters; source line breaks and
+/// indentation become one space), on one line with no leading or trailing space, at most
+/// [`MAX_SAMPLE_CHARS`] characters. Satisfies [`valid_link_sample`].
+fn sample_text(source: &str) -> String {
+    let one_line: String = source
+        .chars()
+        .map(|c| {
+            if class_of(c) == Class::Newline {
+                ' '
+            } else {
+                c
+            }
+        })
+        .collect();
+    let mut out = Out::new(MAX_SAMPLE_SOURCE);
+    out.text(&one_line, false);
+    let mut s: String = out
+        .s
+        .chars()
+        .map(|c| if c == '\n' { ' ' } else { c })
+        .take(MAX_SAMPLE_CHARS)
+        .collect();
+    let kept = s
+        .trim_end_matches(|c: char| c == ' ' || class_of(c) == Class::Joiner)
+        .len();
+    s.truncate(kept);
+    s
+}
+
+/// Whether `s` keeps the link text sample contract (manifest `ManifestLink.text_samples`): at
+/// most [`MAX_SAMPLE_CHARS`] characters, no leading or trailing space, and none of the characters
+/// the body text's policy removes or turns into spaces and line breaks (C0 and C1 controls, line
+/// and paragraph separators, tabs and other spaces but U+0020, bidi controls, invisible
+/// characters).
+pub fn valid_link_sample(s: &str) -> bool {
+    s.chars().count() <= MAX_SAMPLE_CHARS
+        && !s.starts_with(' ')
+        && !s.ends_with(' ')
+        && s.chars().all(|c| {
+            c == ' '
+                || !matches!(
+                    class_of(c),
+                    Class::Space | Class::Newline | Class::Control | Class::Bidi | Class::Invisible
+                )
+        })
 }
 
 struct Sink {

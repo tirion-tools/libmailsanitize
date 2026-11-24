@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 
 use mailsanitize::{
     Config, MAX_LINKS, MAX_REMOTE_IMAGES, MAX_URL, Manifest, Theme, sanitize, text,
-    valid_resource_id,
+    valid_link_sample, valid_resource_id,
 };
 
 fn walk(dir: &Path, out: &mut Vec<PathBuf>) {
@@ -27,6 +27,11 @@ fn check(m: &Manifest) {
         assert_eq!(l.index as usize, i + 1);
         assert!(l.href.len() <= MAX_URL && l.href.bytes().all(|b| (0x21..=0x7e).contains(&b)));
         assert!(l.text_samples.len() <= 4);
+        assert!(
+            l.text_samples.iter().all(|s| valid_link_sample(s)),
+            "{:?}",
+            l.text_samples
+        );
     }
     assert!(m.remote_images.len() <= MAX_REMOTE_IMAGES);
     assert!(m.remote_images.iter().all(|r| valid_resource_id(&r.id)));

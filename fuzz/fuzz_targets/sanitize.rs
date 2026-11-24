@@ -1,6 +1,7 @@
 //! The sanitizer on arbitrary bytes: the text fallback on the lossy decoding of every input, and
 //! sanitize under the theme picked by the first byte for valid UTF-8. Asserts the output
-//! contract: the manifest bounds, no forbidden characters in the fallback text, and a sanitized
+//! contract: the manifest bounds and its link text samples (`valid_link_sample`), no forbidden
+//! characters in the fallback text, and a sanitized
 //! document with no `<script` anywhere in its text that, parsed again with html5ever (its own
 //! tree, not the library's), holds no active content:
 //! - no `</` in a `<style>` text (nothing can end the element early);
@@ -30,7 +31,11 @@ fn check_manifest(m: &Manifest) {
                 && l.href.bytes().all(|b| (0x21..=0x7e).contains(&b))
         );
         assert!(l.text_samples.len() <= 4);
-        assert!(l.text_samples.iter().all(|s| s.chars().count() <= 256));
+        assert!(
+            l.text_samples
+                .iter()
+                .all(|s| mailsanitize::valid_link_sample(s))
+        );
     }
     assert!(m.resource_ids_used.len() <= mailsanitize::MAX_CID_IDS);
     assert!(m.remote_images.len() <= mailsanitize::MAX_REMOTE_IMAGES);

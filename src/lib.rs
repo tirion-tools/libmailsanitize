@@ -22,7 +22,7 @@ pub use sanitize::{
     MAX_CID_IDS, MAX_INLINE_BYTES, MAX_INLINE_IMAGES, MAX_REMOTE_IMAGES, MAX_RESOURCE_ID,
     OFF_RESOURCE_ID, cid_resource_id, valid_resource_id,
 };
-pub use text::{Hidden, MAX_LINKS, MAX_URL, TEXT_CAP};
+pub use text::{Hidden, MAX_LINKS, MAX_SAMPLE_CHARS, MAX_URL, TEXT_CAP, valid_link_sample};
 
 /// What the sanitized document does with images.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -83,7 +83,9 @@ pub struct ManifestLink {
     pub index: u32,
     /// http, https or mailto; printable ASCII, at most [`MAX_URL`] bytes.
     pub href: String,
-    /// Visible link texts, at most 4, each at most 256 characters.
+    /// Visible link texts, at most 4: each as the reader sees it, on one line with whitespace
+    /// collapsed and the text's character policy applied (no controls, bidi controls or invisible
+    /// characters), at most [`MAX_SAMPLE_CHARS`] characters ([`valid_link_sample`]).
     pub text_samples: Vec<String>,
 }
 
@@ -730,5 +732,56 @@ mod tests {
         .expect("thread");
         color::STRICT.with(|s| s.set(false));
         assert_eq!(other, dark);
+    }
+
+    /// Newsletter link text laid out over several source lines (indentation, `<br>`, tabs, padding
+    /// characters, a bidi control): every sample is the one-line text the reader sees, which a
+    /// consumer re-checking the contract accepts (Graphein refused the whole manifest of such
+    /// messages: "Couldn't read this message").
+    #[test]
+    fn link_samples_are_one_line_of_visible_text() {
+        let html = "<table><tr><td>\n  <a href='https://shop.example/offer'>\n    Learn\n    more\n  </a>\n\
+                    <a href='https://shop.example/help'>Help&nbsp;centre<br>\t1-800-555-0100</a>\n\
+                    <a href='https://shop.example/x'>&#x202e;Pay&#8203;&shy;&#847; now&#x2028;</a>\n\
+                    <a href='https://shop.example/y'><img alt=' Shop\n logo ' src='https://img.test/l.png'> \n</a>\n\
+                    </td></tr></table>";
+        let want = [
+            vec!["Learn more"],
+            vec!["Help centre 1-800-555-0100"],
+            vec!["Pay now"],
+            vec!["Shop logo"],
+        ];
+        let t = text(html, &Config::default());
+        let s = sanitize(html, Theme::Light, vec![], &Config::default());
+        for m in [&t.manifest, &s.manifest] {
+            let got: Vec<_> = m.links.iter().map(|l| l.text_samples.clone()).collect();
+            assert_eq!(got, want);
+            assert!(
+                m.links
+                    .iter()
+                    .flat_map(|l| &l.text_samples)
+                    .all(|x| valid_link_sample(x))
+            );
+        }
+        // "abc abc …": the 256th character is a space, so the sample ends at 255 on "abc".
+        let long = format!(
+            "<a href='https://shop.example/'>{}</a>",
+            "abc\n".repeat(400)
+        );
+        let l = &text(&long, &Config::default()).manifest.links[0].text_samples[0];
+        assert_eq!(l.chars().count(), MAX_SAMPLE_CHARS - 1);
+        assert!(l.ends_with("abc") && valid_link_sample(l));
+        for bad in [
+            "a\nb",
+            "a\tb",
+            " a",
+            "a ",
+            "a\u{a0}b",
+            "\u{202e}a",
+            "a\u{200b}",
+            "a\u{7}",
+        ] {
+            assert!(!valid_link_sample(bad), "{bad:?}");
+        }
     }
 }
