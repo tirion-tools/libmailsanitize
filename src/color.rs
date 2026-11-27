@@ -1,4 +1,5 @@
-//! Colour math (WCAG contrast, OKLCH via `palette`) and the dark policy rules.
+//! Colour math (WCAG contrast, OKLCH via `palette`), the dark policy rules and the fixed
+//! high-contrast palettes.
 
 use palette::{FromColor, Lab, OklabHue, Oklch, Srgb};
 
@@ -103,6 +104,56 @@ pub fn from_oklch(l: f32, chroma: f32, hue: f32, a: f32) -> Rgb {
     }
 }
 
+/// How the transform re-colours a document.
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub enum Policy {
+    /// Dark policy v1; `strict` also re-colours sender text on preserved fills (WCAG AA).
+    Dark { strict: bool },
+    /// Every colour becomes one of the palette's.
+    Fixed(Palette),
+}
+
+// ---------------------------------------------------------------------------
+// High-contrast palettes. Constants of the library: no caller or theme changes them.
+// ---------------------------------------------------------------------------
+
+/// A fixed palette: every text and border colour of the document becomes `text`, every background
+/// `bg`, and the text of every link `link`.
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub struct Palette {
+    pub text: Rgb,
+    pub bg: Rgb,
+    pub link: Rgb,
+    /// The document's `color-scheme` is dark (system colours and form controls follow it).
+    pub dark: bool,
+}
+
+/// Black on white; links 10.2:1 on the background (the High Contrast theme's `text.link`).
+pub const HIGH_CONTRAST: Palette = Palette {
+    text: Rgb::hex(0x000000),
+    bg: Rgb::hex(0xffffff),
+    link: Rgb::hex(0x0033aa),
+    dark: false,
+};
+/// White on black; links 13.1:1 on the background (the High Contrast Dark theme's `text.link`).
+pub const HIGH_CONTRAST_DARK: Palette = Palette {
+    text: Rgb::hex(0xffffff),
+    bg: Rgb::hex(0x000000),
+    link: Rgb::hex(0x9cd2ff),
+    dark: true,
+};
+
+impl Palette {
+    /// The palette's colour for a colour in `role`; `link` when it styles a link's text.
+    pub fn color(&self, role: Role, link: bool) -> Rgb {
+        match role {
+            Role::Foreground if link => self.link,
+            Role::Foreground | Role::Border => self.text,
+            Role::Background => self.bg,
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Dark policy v1. All constants are listed here.
 // ---------------------------------------------------------------------------
@@ -196,12 +247,6 @@ pub fn ensure_contrast(c: Rgb, bg: Rgb, target: f32) -> Rgb {
     }
 }
 
-thread_local! {
-    /// Strict AA variant: also re-colour sender text on backgrounds the policy preserved. Per
-    /// thread, so concurrent documents on other threads never see another call's policy.
-    pub static STRICT: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
-}
-
 fn same_color(a: Rgb, b: Rgb) -> bool {
     let (x, y) = (a.to_u8(), b.to_u8());
     x.0.abs_diff(y.0) <= 1 && x.1.abs_diff(y.1) <= 1 && x.2.abs_diff(y.2) <= 1
@@ -210,22 +255,23 @@ fn same_color(a: Rgb, b: Rgb) -> bool {
 /// Contrast text must reach in dark mode. Where the policy changed the background it owns
 /// the result and requires TEXT_TARGET. Where the background was preserved verbatim (brand
 /// fill, sender-dark surface, unchanged context) the sender's own light-mode pair is kept
-/// if dark mode is no worse (e.g. white on an orange button), unless STRICT is set.
-pub fn required_contrast(c: Rgb, bg: Rgb, orig_bg: Rgb) -> f32 {
+/// if dark mode is no worse (e.g. white on an orange button), unless `strict` (the strict AA
+/// variant) is set.
+pub fn required_contrast(c: Rgb, bg: Rgb, orig_bg: Rgb, strict: bool) -> f32 {
     let (now_bg, then_bg) = (bg.over(CANVAS), orig_bg.over(Rgb::hex(0xffffff)));
     if !same_color(now_bg, then_bg) {
         TEXT_TARGET
-    } else if STRICT.with(std::cell::Cell::get) {
+    } else if strict {
         4.5 // WCAG AA; sender pairs that already pass stay untouched
     } else {
         TEXT_TARGET.min(contrast(c.over(then_bg), then_bg))
     }
 }
 
-pub fn map_fg(c: Rgb, bg: Rgb, orig_bg: Rgb) -> Rgb {
+pub fn map_fg(c: Rgb, bg: Rgb, orig_bg: Rgb, strict: bool) -> Rgb {
     if c.a > 0.001 {
         let now_bg = bg.over(CANVAS);
-        if contrast(c.over(now_bg), now_bg) >= required_contrast(c, bg, orig_bg) {
+        if contrast(c.over(now_bg), now_bg) >= required_contrast(c, bg, orig_bg, strict) {
             return c;
         }
     }
@@ -247,10 +293,10 @@ pub fn map_border(c: Rgb, bg: Rgb, orig_bg: Rgb) -> Rgb {
     ensure_contrast(c, bg, target)
 }
 
-pub fn map(c: Rgb, role: Role, ctx_bg: Rgb, ctx_orig_bg: Rgb) -> Rgb {
+pub fn map(c: Rgb, role: Role, ctx_bg: Rgb, ctx_orig_bg: Rgb, strict: bool) -> Rgb {
     match role {
         Role::Background => map_bg(c),
-        Role::Foreground => map_fg(c, ctx_bg, ctx_orig_bg),
+        Role::Foreground => map_fg(c, ctx_bg, ctx_orig_bg, strict),
         Role::Border => map_border(c, ctx_bg, ctx_orig_bg),
     }
 }

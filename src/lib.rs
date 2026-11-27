@@ -1,9 +1,10 @@
 //! HTML email sanitizer: one HTML part in, either a sanitized document (ammonia allowlist,
-//! lightningcss reprint, optional dark-mode transform) or a plain-text fallback, each with a
-//! [`Manifest`] of the links, hidden text and image references found.
+//! lightningcss reprint, optional dark-mode or high-contrast transform) or a plain-text fallback,
+//! each with a [`Manifest`] of the links, hidden text and image references found.
 //!
 //! - [`sanitize`]: allowlist sanitizing; image sources become opaque `<scheme>://<id>/`
-//!   references the caller resolves; [`Theme::Dark`] applies dark policy v1.
+//!   references the caller resolves; [`Theme::Dark`] applies dark policy v1,
+//!   [`Theme::HighContrast`] and [`Theme::HighContrastDark`] a fixed palette.
 //! - [`text`]: an isolated HTML-to-text converter (html5ever tokenizer only; it shares none of the
 //!   sanitize pipeline), for when sanitizing or rendering has failed.
 //!
@@ -74,6 +75,12 @@ pub enum Theme {
     Dark,
     /// Dark policy v1 that also re-colours sender text on preserved fills (WCAG AA).
     DarkStrict,
+    /// High contrast, black on white: every text and border colour becomes black, every
+    /// background white, and link text `#0033aa` (10.2:1), underlined. Images are kept.
+    HighContrast,
+    /// High contrast, white on black: text and borders white, backgrounds black, link text
+    /// `#9cd2ff` (13.1:1), underlined. Images are kept.
+    HighContrastDark,
 }
 
 /// One listed link.
@@ -235,15 +242,14 @@ fn failed_closed(input: &str, theme: Theme, config: &Config) -> Sanitized {
 }
 
 fn themed(sanitized: String, theme: Theme) -> String {
-    match theme {
-        Theme::Dark | Theme::DarkStrict => {
-            color::STRICT.with(|s| s.set(theme == Theme::DarkStrict));
-            let html = dom::process(&sanitized, css::Mode::Transform).html;
-            color::STRICT.with(|s| s.set(false));
-            html
-        }
-        Theme::Light => sanitized,
-    }
+    let policy = match theme {
+        Theme::Light => return sanitized,
+        Theme::Dark => color::Policy::Dark { strict: false },
+        Theme::DarkStrict => color::Policy::Dark { strict: true },
+        Theme::HighContrast => color::Policy::Fixed(color::HIGH_CONTRAST),
+        Theme::HighContrastDark => color::Policy::Fixed(color::HIGH_CONTRAST_DARK),
+    };
+    dom::process(&sanitized, css::Mode::Transform(policy)).html
 }
 
 /// The plain-text fallback of one HTML part (invalid UTF-8 already replaced by the caller).
@@ -261,7 +267,17 @@ pub fn text(input: &str, config: &Config) -> Text {
 mod tests {
     use super::*;
 
-    const THEMES: [Theme; 3] = [Theme::Light, Theme::Dark, Theme::DarkStrict];
+    const THEMES: [Theme; 5] = [
+        Theme::Light,
+        Theme::Dark,
+        Theme::DarkStrict,
+        Theme::HighContrast,
+        Theme::HighContrastDark,
+    ];
+    const HIGH_CONTRAST: [(Theme, color::Palette); 2] = [
+        (Theme::HighContrast, color::HIGH_CONTRAST),
+        (Theme::HighContrastDark, color::HIGH_CONTRAST_DARK),
+    ];
 
     /// CSS escapes that lightningcss decodes: printed as is, `</style>` would end the element and
     /// the rest would be markup the allowlist never saw (fuzz finding of 2026-11-17).
@@ -571,7 +587,7 @@ mod tests {
              <img src='data:image/svg+xml;base64,PHN2Zz4='><img src='data:image/png;base64,!!!'>",
             PNG_B64[..20].to_string() + "\n" + &PNG_B64[20..]
         );
-        for theme in [Theme::Light, Theme::Dark, Theme::DarkStrict] {
+        for theme in THEMES {
             let s = sanitize(&html, theme, vec![], &Config::default());
             assert!(!s.document.contains("base64"), "{theme:?}: {}", s.document);
             assert!(!s.document.contains("data:"), "{theme:?}");
@@ -628,7 +644,7 @@ mod tests {
              <p style=\"color:red;background:url('data:image/png;base64,{PNG_B64}')\">t</p>\
              <style>p{{background-image:url(data:image/png;base64,{PNG_B64});color:blue}}</style>"
         );
-        for theme in [Theme::Light, Theme::Dark] {
+        for theme in THEMES {
             let s = sanitize(&html, theme, vec![cid.clone()], &cfg);
             assert_eq!(
                 s.document.matches("mail-resource://off/").count(),
@@ -648,7 +664,8 @@ mod tests {
 
     #[test]
     fn dark_backdrop_still_reads_inline_pngs() {
-        // Dark text-coloured transparent PNG: gets a backdrop in dark mode (dom.rs image rule).
+        // Dark text-coloured transparent PNG: gets a backdrop on a dark background (dom.rs image
+        // rule), in dark mode and high contrast dark, and none on high contrast's white.
         let mut img = Vec::new();
         {
             let mut e = png::Encoder::new(&mut img, 8, 8);
@@ -664,9 +681,23 @@ mod tests {
         use base64::Engine;
         let b = base64::engine::general_purpose::STANDARD.encode(&img);
         let html = format!("<img src='data:image/png;base64,{b}'>");
-        let d = sanitize(&html, Theme::Dark, vec![], &Config::default());
-        assert!(d.document.contains("background-color:"), "{}", d.document);
-        assert_eq!(d.manifest.inline_images[0].data, img);
+        for (theme, backdrop) in [
+            (Theme::Dark, true),
+            (Theme::HighContrastDark, true),
+            (Theme::HighContrast, false),
+        ] {
+            let d = sanitize(&html, theme, vec![], &Config::default());
+            let style = attrs(&d.document, "<img", "style");
+            assert_eq!(
+                style
+                    .first()
+                    .is_some_and(|s| s.contains("background-color:#ffffff")),
+                backdrop,
+                "{theme:?}: {}",
+                d.document
+            );
+            assert_eq!(d.manifest.inline_images[0].data, img);
+        }
     }
 
     #[test]
@@ -721,17 +752,150 @@ mod tests {
     }
 
     #[test]
-    fn strict_policy_stays_on_its_thread() {
-        let html = "<table><tr><td bgcolor='#ff8800' style='color:#ffffff'>Buy</td></tr></table>";
-        let dark = sanitize(html, Theme::Dark, vec![], &Config::default()).document;
-        color::STRICT.with(|s| s.set(true));
-        let other = std::thread::spawn(move || {
-            sanitize(html, Theme::Dark, vec![], &Config::default()).document
-        })
-        .join()
-        .expect("thread");
-        color::STRICT.with(|s| s.set(false));
-        assert_eq!(other, dark);
+    fn high_contrast_palettes_reach_their_targets() {
+        for (theme, p) in HIGH_CONTRAST {
+            let text = color::contrast(p.text, p.bg);
+            let link = color::contrast(p.link, p.bg);
+            assert!(text >= 7.0 && link >= 7.0, "{theme:?}: {text} {link}");
+        }
+        // The figures the documentation gives.
+        let ratio = |c, b| (color::contrast(c, b) * 10.0).round() / 10.0;
+        let (hc, hcd) = (color::HIGH_CONTRAST, color::HIGH_CONTRAST_DARK);
+        assert_eq!([ratio(hc.text, hc.bg), ratio(hc.link, hc.bg)], [21.0, 10.2]);
+        assert_eq!(
+            [ratio(hcd.text, hcd.bg), ratio(hcd.link, hcd.bg)],
+            [21.0, 13.1]
+        );
+    }
+
+    /// Every `#rgb`/`#rrggbb` colour of a document, as six lowercase digits.
+    fn hex_colors(doc: &str) -> Vec<String> {
+        let mut out = vec![];
+        let mut rest = doc;
+        while let Some(at) = rest.find('#') {
+            rest = &rest[at + 1..];
+            let len = rest.bytes().take_while(u8::is_ascii_hexdigit).count();
+            let hex = rest[..len].to_ascii_lowercase();
+            out.push(match len {
+                3 => hex.chars().flat_map(|c| [c, c]).collect(),
+                _ => hex,
+            });
+            rest = &rest[len..];
+        }
+        out
+    }
+
+    /// `name="value"` of every element whose start tag begins with `start`.
+    fn attrs<'a>(doc: &'a str, start: &str, name: &str) -> Vec<&'a str> {
+        let key = format!(" {name}=\"");
+        doc.match_indices(start)
+            .filter_map(|(at, _)| {
+                let tag = &doc[at..at + doc[at..].find('>').expect("tag end")];
+                let v = &tag[tag.find(&key)? + key.len()..];
+                Some(&v[..v.find('"').expect("value end")])
+            })
+            .collect()
+    }
+
+    #[test]
+    fn high_contrast_forces_the_palette_and_keeps_images() {
+        let html = format!(
+            "<style>p{{color:#777;background:#eee}}.x{{color:#f0f0f0!important}}\
+             a{{color:#fefefe}}a:hover{{color:#ff0011;text-decoration:none}}\
+             @media (prefers-color-scheme:dark){{p{{color:#eeeeee;background-color:#111111}}}}</style>\
+             <table bgcolor='#ffcc00' bordercolor='#ff0011'><tr>\
+             <td style='color:#ccc;background-color:#123456!important;border:2px solid #ff0011'>cell</td>\
+             </tr></table>\
+             <p class='x'>class</p><font color='#999999'>font</font>\
+             <p style='background:linear-gradient(#ff0011,#00ff11)'>gradient</p>\
+             <div style='background:#ffffff'><a href='https://e.test/a' style='color:#ffffff'>same</a></div>\
+             <div style='background:#000000'><a href='https://e.test/b' style='color:#000000!important;text-decoration:none!important'>dark</a></div>\
+             <a href='https://e.test/c'><span style='color:#333333'>inner</span><font color='#fefefe'>f</font></a>\
+             <a name='top'>anchor</a>\
+             <img src='https://img.test/a.png' width='4'>\
+             <div style='background-image:url(data:image/png;base64,{PNG_B64});color:#ffffff'>on image</div>"
+        );
+        for (theme, p) in HIGH_CONTRAST {
+            let s = sanitize(&html, theme, vec![], &Config::default());
+            let d = &s.document;
+            let palette: Vec<String> = [p.text, p.bg, p.link]
+                .map(|c| c.css()[1..].to_string())
+                .into();
+            for c in hex_colors(d) {
+                assert!(palette.contains(&c), "{theme:?}: #{c} in {d}");
+            }
+            assert!(!d.contains("rgb"), "{theme:?}: {d}");
+            // Unstyled text and the scheme.
+            assert!(
+                d.contains(&format!(
+                    ":root{{color-scheme:{}!important;background-color:{}!important;color:{}!important}}",
+                    if p.dark { "dark" } else { "light" },
+                    p.bg.css(),
+                    p.text.css()
+                )),
+                "{theme:?}: {d}"
+            );
+            assert_eq!(attrs(d, "<table", "bgcolor"), [p.bg.css()], "{theme:?}");
+            assert_eq!(attrs(d, "<table", "bordercolor"), [p.text.css()]);
+            assert_eq!(attrs(d, "<font", "color"), [p.text.css(), p.link.css()]);
+            // Links, whatever the sender's colour and importance: the link colour, underlined,
+            // last in the style attribute; the anchor that is no link the text colour.
+            let link_decl = format!("color:{}!important", p.link.css());
+            let a = attrs(d, "<a ", "style");
+            assert_eq!(a.len(), 4, "{theme:?}: {d}");
+            for style in &a[..3] {
+                assert!(
+                    style.ends_with(&format!("{link_decl};text-decoration:underline!important")),
+                    "{theme:?}: {style}"
+                );
+            }
+            assert!(a[3].ends_with(&format!("color:{}!important", p.text.css())));
+            assert!(attrs(d, "<span", "style")[0].ends_with(&link_decl));
+            assert!(color::contrast(p.link, p.bg) >= 4.5);
+            // Images and their references are kept.
+            assert!(d.contains("src=\"mail-resource://img-0/\""), "{d}");
+            assert!(d.contains("url(mail-resource://dat-0/)"), "{d}");
+            assert_eq!(s.manifest.remote_images.len(), 1);
+            assert_eq!(s.manifest.inline_images.len(), 1);
+            assert_eq!(attrs(d, "<img", "style"), Vec::<&str>::new());
+            assert!(!d.contains("data-gx-fallback"));
+        }
+    }
+
+    #[test]
+    fn high_contrast_text_fallback_is_in_the_palette() {
+        for (theme, p) in HIGH_CONTRAST {
+            let s = failed_closed("<p style='color:#777'>Hi</p>", theme, &Config::default());
+            let d = &s.document;
+            assert!(d.contains(" data-gx-fallback=\"text\""), "{d}");
+            assert!(
+                d.contains(&format!(
+                    "background-color:{}!important;color:{}!important",
+                    p.bg.css(),
+                    p.text.css()
+                )),
+                "{theme:?}: {d}"
+            );
+        }
+    }
+
+    #[test]
+    fn themes_differ_and_do_not_leak_into_each_other() {
+        let html = "<table><tr><td bgcolor='#ff8800' style='color:#ffffff'>Buy</td></tr></table>\
+                    <p>text <a href='https://e.test/'>link</a></p>";
+        let cfg = Config::default();
+        let docs: Vec<String> = THEMES
+            .iter()
+            .map(|&t| sanitize(html, t, vec![], &cfg).document)
+            .collect();
+        for (i, a) in docs.iter().enumerate() {
+            for b in &docs[i + 1..] {
+                assert_ne!(a, b);
+            }
+        }
+        for (theme, doc) in THEMES.iter().zip(&docs).rev() {
+            assert_eq!(&sanitize(html, *theme, vec![], &cfg).document, doc);
+        }
     }
 
     /// Newsletter link text laid out over several source lines (indentation, `<br>`, tabs, padding

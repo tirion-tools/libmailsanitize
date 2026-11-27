@@ -6,9 +6,17 @@
 use std::path::{Path, PathBuf};
 
 use mailsanitize::{
-    Config, MAX_LINKS, MAX_REMOTE_IMAGES, MAX_URL, Manifest, Theme, sanitize, text,
-    valid_link_sample, valid_resource_id,
+    Config, MAX_LINKS, MAX_REMOTE_IMAGES, MAX_URL, Manifest, Theme, cid_resource_id, sanitize,
+    text, valid_link_sample, valid_resource_id,
 };
+
+const THEMES: [Theme; 5] = [
+    Theme::Light,
+    Theme::Dark,
+    Theme::DarkStrict,
+    Theme::HighContrast,
+    Theme::HighContrastDark,
+];
 
 fn walk(dir: &Path, out: &mut Vec<PathBuf>) {
     for e in std::fs::read_dir(dir).expect("corpus dir").flatten() {
@@ -69,7 +77,7 @@ fn corpus_documents_keep_the_output_contract() {
         let Ok(html) = std::str::from_utf8(&bytes) else {
             continue;
         };
-        for theme in [Theme::Light, Theme::Dark, Theme::DarkStrict] {
+        for theme in THEMES {
             let a = sanitize(html, theme, vec![], &cfg);
             check(&a.manifest);
             assert!(
@@ -97,7 +105,7 @@ fn a_flattened_nested_rule_leaves_the_cells_visible() {
         .join("tests/corpus/dark-mode/25-flattened-nested-rule.html");
     let html = std::fs::read_to_string(path).expect("read");
     let cfg = Config::default();
-    for theme in [Theme::Light, Theme::Dark, Theme::DarkStrict] {
+    for theme in THEMES {
         let out = sanitize(&html, theme, vec![], &cfg);
         assert!(!out.document.contains("opacity"), "{theme:?}");
         assert!(!out.document.contains("left:-40px"), "{theme:?}");
@@ -107,6 +115,90 @@ fn a_flattened_nested_rule_leaves_the_cells_visible() {
     let t = text(&html, &cfg);
     assert!(t.manifest.hidden.is_empty(), "{:?}", t.manifest.hidden);
     assert!(t.text.contains("Library extends weekend opening hours"));
+}
+
+/// Every `#rgb`/`#rrggbb` colour of a document, as six lowercase digits.
+fn hex_colors(doc: &str) -> Vec<String> {
+    let mut out = vec![];
+    let mut rest = doc;
+    while let Some(at) = rest.find('#') {
+        rest = &rest[at + 1..];
+        let len = rest.bytes().take_while(u8::is_ascii_hexdigit).count();
+        let hex = rest[..len].to_ascii_lowercase();
+        out.push(match len {
+            3 => hex.chars().flat_map(|c| [c, c]).collect(),
+            _ => hex,
+        });
+        rest = &rest[len..];
+    }
+    out
+}
+
+/// `high-contrast/`: under the high-contrast themes every colour in the document is one of the
+/// theme's palette (text, background, link), every link's style ends with the link colour and an
+/// underline, which outrank the sender's rules, and every image is kept. The fixtures use no
+/// colour that prints as a name, so a sender colour that survived would show here.
+#[test]
+fn high_contrast_documents_hold_only_the_palette() {
+    let mut files = vec![];
+    walk(
+        &Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/corpus/high-contrast"),
+        &mut files,
+    );
+    assert!(!files.is_empty());
+    let cfg = Config::default();
+    let ids: Vec<String> = ["logo.png", "hero.jpg", "icon.png"]
+        .iter()
+        .map(|c| cid_resource_id(c.as_bytes()))
+        .collect();
+    for f in &files {
+        let html = std::fs::read_to_string(f).expect("read");
+        for (theme, text, bg, link) in [
+            (Theme::HighContrast, "000000", "ffffff", "0033aa"),
+            (Theme::HighContrastDark, "ffffff", "000000", "9cd2ff"),
+        ] {
+            let out = sanitize(&html, theme, ids.clone(), &cfg);
+            let d = &out.document;
+            for c in hex_colors(d) {
+                assert!(
+                    [text, bg, link].contains(&c.as_str()),
+                    "{theme:?} #{c}: {d}"
+                );
+            }
+            assert!(
+                !d.contains("rgb") && !d.contains("light-dark"),
+                "{theme:?}: {d}"
+            );
+            let decl = format!("color:#{link}!important;text-decoration:underline!important");
+            let styles: Vec<&str> = d
+                .match_indices("<a ")
+                .map(|(at, _)| &d[at..at + d[at..].find('>').expect("tag end")])
+                .filter(|tag| tag.contains(" href=\""))
+                .map(|tag| {
+                    let v = &tag[tag.find(" style=\"").expect("style") + 8..];
+                    &v[..v.find('"').expect("value end")]
+                })
+                .collect();
+            // Links hidden colour-on-colour in the sender's design are not in the manifest, but the
+            // palette shows them: every one of them.
+            assert_eq!(styles.len(), html.matches("<a href").count(), "{theme:?}");
+            for style in styles {
+                assert!(style.ends_with(&decl), "{theme:?}: {style}");
+            }
+            assert_eq!(
+                d.matches("<img").count(),
+                html.matches("<img").count(),
+                "{theme:?}"
+            );
+            // The palette keeps every picture the sender's colours keep (a CSS `url(cid:…)` is
+            // refused in every theme, `map_css_url`).
+            let light = sanitize(&html, Theme::Light, ids.clone(), &cfg);
+            assert_eq!(
+                out.manifest.resource_ids_used, light.manifest.resource_ids_used,
+                "{theme:?}"
+            );
+        }
+    }
 }
 
 /// Each kept fuzz finding (`fuzz/corpus/sanitize/crash-*`, the libFuzzer input and its minimised
@@ -123,7 +215,7 @@ fn fuzz_findings_keep_the_output_contract() {
         let data = std::fs::read(e.path()).expect("read");
         let (_, html) = data.split_first().expect("a selector byte");
         let html = std::str::from_utf8(html).expect("UTF-8");
-        for theme in [Theme::Light, Theme::Dark, Theme::DarkStrict] {
+        for theme in THEMES {
             let out = sanitize(html, theme, vec![], &Config::default());
             check(&out.manifest);
             let doc = out.document.to_ascii_lowercase();

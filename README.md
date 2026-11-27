@@ -2,7 +2,7 @@
 
 An HTML email sanitizer in Rust. One HTML part goes in. One of two things comes out:
 
-- a sanitized document, optionally re-coloured for a dark theme;
+- a sanitized document, optionally re-coloured for a dark theme or a fixed high-contrast palette;
 - a plain-text fallback.
 
 Each comes with a manifest of the links, the hidden text and the image references the part contains.
@@ -79,6 +79,22 @@ Related projects, and why this crate does not use them:
 - **Dark policy v1** (`Theme::Dark`, `Theme::DarkStrict`). Light backgrounds are darkened, and text and borders are
   re-coloured to reach contrast targets in OKLCH. Brand fills and surfaces the sender already made dark are kept.
   Low-contrast images get a backing.
+- **High contrast** (`Theme::HighContrast`, `Theme::HighContrastDark`, since 0.2.7). A fixed palette, constants of the
+  library that no caller or theme changes:
+
+  | Theme | Text, borders | Backgrounds | Link text (on the background) |
+  |---|---|---|---|
+  | `HighContrast` | `#000000` | `#ffffff` | `#0033aa` (10.2:1) |
+  | `HighContrastDark` | `#ffffff` | `#000000` | `#9cd2ff` (13.1:1) |
+
+  Every colour in stylesheets (including the sender's `prefers-color-scheme: dark` rules, gradients, `currentColor`,
+  system colours and `light-dark()`), `style` attributes and colour attributes (`bgcolor`, `bordercolor`,
+  `<font color>`) becomes the palette's; fully transparent colours stay transparent. Rules whose selectors all style
+  links (`a`, `:link`, `:visited`, or inside one) take the link colour. Every `<a href>` and everything inside it also
+  gets the link colour as a last `!important` inline declaration, and the link an underline (the palette's link and
+  text colours differ by hue more than by contrast); an anchor with no `href` gets the text colour. The root carries
+  the palette and the matching `color-scheme`, so unstyled text is covered. Images and background images are kept,
+  with the same low-contrast backing as dark mode. The text fallback is themed the same way.
 - **Text fallback** (`text`) for when sanitizing or rendering a part has failed. It shares as little as possible with the
   path that just failed: it uses html5ever's tokenizer alone (no tree builder, no ammonia, no lightningcss) with its own
   bounded element stack. Its output:
@@ -158,6 +174,8 @@ supplies CID parts computes the same id. The value is fixed by a test.
   - `hostile/`: a hostile document, a representative one and the CSS-escape breakouts of MAILSANITIZE-2026-001;
   - `dark-mode/`: 25 dark-mode fixtures and their images (24: an HTML-only notice whose link texts span source lines;
     25: newsletter cells whose style attributes carry a nested rule flattened with its braces lost);
+  - `high-contrast/`: brand-coloured newsletters; under both high-contrast themes every colour of the document must be
+    the palette's, every link must end its style with the link colour, and every image must be kept;
   - `text-fallback/textgen.py`: writes 34 text-fallback stress documents, up to 4 MiB each.
 
   Every document goes through every theme and through the text fallback. The output contract is checked, and no document

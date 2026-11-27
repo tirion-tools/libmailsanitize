@@ -1,6 +1,6 @@
-//! Post-sanitize document pass: the full transform and the hybrid
-//! preflight. Tracks the background each element paints on so text
-//! colours can be chosen against their real context.
+//! Post-sanitize document pass: the full transform (dark policy or fixed palette) and the hybrid
+//! preflight. Tracks the background each element paints on so text colours can be chosen against
+//! their real context.
 
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -9,8 +9,8 @@ use lol_html::html_content::ContentType;
 use lol_html::{RewriteStrSettings, element, rewrite_str, text};
 
 use crate::color::{
-    CANVAS, Rgb, blink_auto_dark_bg, contrast, map_bg, map_border, map_fg, parse_attr_color,
-    required_contrast,
+    CANVAS, Palette, Policy, Rgb, blink_auto_dark_bg, contrast, map_bg, map_border, map_fg,
+    parse_attr_color, required_contrast,
 };
 use crate::css::{
     BlockColors, Mode, SimpleRule, Stats, process_stylesheet, recolor_style_attr, scan_style_attr,
@@ -24,11 +24,13 @@ const UA_LINK: Rgb = Rgb::hex(0x0000ee);
 /// fall below 3:1 on the dark background (and did not on the original one).
 pub const IMAGE_LOW_FRACTION: f32 = 0.25;
 
-pub fn text_color() -> Rgb {
-    map_fg(BLACK, CANVAS, WHITE)
+/// Unstyled text in dark mode (`strict` changes nothing on the canvas, which is never the
+/// sender's background).
+fn text_color(strict: bool) -> Rgb {
+    map_fg(BLACK, CANVAS, WHITE, strict)
 }
-pub fn link_color() -> Rgb {
-    map_fg(UA_LINK, CANVAS, WHITE)
+fn link_color(strict: bool) -> Rgb {
+    map_fg(UA_LINK, CANVAS, WHITE, strict)
 }
 
 #[derive(Clone, Copy)]
@@ -38,6 +40,8 @@ struct Frame {
     orig_bg: Rgb,
     mapped_bg: Rgb,
     image: bool,
+    /// Inside an `<a href>` (the element itself included).
+    link: bool,
 }
 
 struct Walker {
@@ -86,6 +90,84 @@ fn prepend_style(existing: Option<String>, decl: &str) -> String {
     }
 }
 
+/// After the sender's declarations, so it wins over an `!important` one of theirs too.
+fn append_style(existing: Option<String>, decl: &str) -> String {
+    match existing {
+        Some(s) if !s.trim().is_empty() => format!("{s};{decl}"),
+        _ => decl.to_string(),
+    }
+}
+
+/// The fixed-palette pass over one element's colours. Inline colours and colour attributes
+/// become the palette's (stylesheets were re-coloured before). A link and everything inside it
+/// gets the link colour as an `!important` inline declaration, which no sender rule outranks, and
+/// the link itself an underline, since the palette's link and text colours differ by hue more
+/// than by contrast; an anchor that is no link gets the text colour the same way.
+fn fixed_colors(
+    w: &mut Walker,
+    el: &mut lol_html::html_content::Element,
+    palette: Palette,
+    link: bool,
+    attr_bg: Option<Rgb>,
+    font_fg: Option<Rgb>,
+) {
+    let style = el.get_attribute("style");
+    let mut new_style = style.as_deref().and_then(|s| {
+        recolor_style_attr(
+            s,
+            Policy::Fixed(palette),
+            palette.bg,
+            palette.bg,
+            false,
+            link,
+            &mut w.stats,
+        )
+    });
+    new_style = new_style.or(style);
+    let mut set = |el: &mut lol_html::html_content::Element, name: &str, from: Rgb, to: Rgb| {
+        w.stats.colors_seen += 1;
+        // Fully transparent paints nothing and stays, as in stylesheets.
+        if from.a > 0.001 {
+            w.stats.colors_rewritten += u32::from(from != to);
+            let _ = el.set_attribute(name, &to.css());
+        }
+    };
+    if let Some(b) = attr_bg {
+        set(el, "bgcolor", b, palette.bg);
+    }
+    if let Some(c) = el
+        .get_attribute("bordercolor")
+        .as_deref()
+        .and_then(parse_attr_color)
+    {
+        set(el, "bordercolor", c, palette.text);
+    }
+    if let Some(c) = font_fg {
+        set(
+            el,
+            "color",
+            c,
+            if link { palette.link } else { palette.text },
+        );
+    }
+    let anchor = el.tag_name().eq_ignore_ascii_case("a");
+    if link {
+        let mut decl = format!("color:{}!important", palette.link.css());
+        if anchor {
+            decl.push_str(";text-decoration:underline!important");
+        }
+        new_style = Some(append_style(new_style, &decl));
+        w.stats.injected_text_colors += 1;
+    } else if anchor {
+        let decl = format!("color:{}!important", palette.text.css());
+        new_style = Some(append_style(new_style, &decl));
+        w.stats.injected_text_colors += 1;
+    }
+    if let Some(s) = new_style {
+        let _ = el.set_attribute("style", &s);
+    }
+}
+
 fn on_element(w: &mut Walker, el: &mut lol_html::html_content::Element) {
     let tag = el.tag_name().to_ascii_lowercase();
     let parent = *w.stack.last().expect("root frame");
@@ -106,6 +188,8 @@ fn on_element(w: &mut Walker, el: &mut lol_html::html_content::Element) {
     } else {
         None
     };
+    let strict = matches!(w.mode, Mode::Transform(Policy::Dark { strict: true }));
+    let in_link = parent.link || (tag == "a" && el.has_attribute("href"));
 
     if let Some(link) = el
         .get_attribute("data-gx-link")
@@ -113,7 +197,7 @@ fn on_element(w: &mut Walker, el: &mut lol_html::html_content::Element) {
         .and_then(parse_attr_color)
     {
         w.link_orig = link;
-        w.link_mapped = map_fg(link, CANVAS, WHITE);
+        w.link_mapped = map_fg(link, CANVAS, WHITE, strict);
         el.remove_attribute("data-gx-link");
     }
 
@@ -126,7 +210,8 @@ fn on_element(w: &mut Walker, el: &mut lol_html::html_content::Element) {
         .unwrap_or(parent.orig_bg);
     let mapped_bg = match (w.mode, own_bg) {
         (_, None) => parent.mapped_bg,
-        (Mode::Transform, Some(b)) => map_bg(b).over(parent.mapped_bg),
+        (Mode::Transform(Policy::Dark { .. }), Some(b)) => map_bg(b).over(parent.mapped_bg),
+        (Mode::Transform(Policy::Fixed(palette)), Some(_)) => palette.bg,
         (Mode::Scan, Some(_)) => blink_auto_dark_bg(orig_bg),
     };
 
@@ -137,11 +222,12 @@ fn on_element(w: &mut Walker, el: &mut lol_html::html_content::Element) {
         mapped_fg = w.link_mapped;
     }
 
-    if w.mode == Mode::Transform {
+    if let Mode::Transform(policy @ Policy::Dark { .. }) = w.mode {
         let mut new_style = style.clone();
         if let Some(s) = style.as_deref() {
             new_style =
-                recolor_style_attr(s, mapped_bg, orig_bg, image, &mut w.stats).or(new_style);
+                recolor_style_attr(s, policy, mapped_bg, orig_bg, image, false, &mut w.stats)
+                    .or(new_style);
         }
         if let Some(b) = attr_bg {
             w.stats.colors_seen += 1;
@@ -167,7 +253,7 @@ fn on_element(w: &mut Walker, el: &mut lol_html::html_content::Element) {
             let m = if image {
                 c
             } else {
-                map_fg(c, mapped_bg, orig_bg)
+                map_fg(c, mapped_bg, orig_bg, strict)
             };
             if m != c {
                 w.stats.colors_rewritten += 1;
@@ -184,7 +270,7 @@ fn on_element(w: &mut Walker, el: &mut lol_html::html_content::Element) {
             mapped_fg = if image {
                 fg
             } else {
-                map_fg(fg, mapped_bg, orig_bg)
+                map_fg(fg, mapped_bg, orig_bg, strict)
             };
         } else if let Some(fg) = cls.fg {
             orig_fg = fg;
@@ -192,25 +278,25 @@ fn on_element(w: &mut Walker, el: &mut lol_html::html_content::Element) {
                 .map(|b| map_bg(b).over(CANVAS))
                 .unwrap_or(CANVAS);
             let rule_orig = cls_rule_bg.map(|b| b.over(WHITE)).unwrap_or(WHITE);
-            mapped_fg = map_fg(fg, rule_ctx, rule_orig);
+            mapped_fg = map_fg(fg, rule_ctx, rule_orig, strict);
         } else if let Some(fg) = font_fg {
             orig_fg = fg;
             mapped_fg = if image {
                 fg
             } else {
-                map_fg(fg, mapped_bg, orig_bg)
+                map_fg(fg, mapped_bg, orig_bg, strict)
             };
         }
         // A class/inherited/link colour was chosen for another background than the one this
         // element paints on: inject an explicit colour picked against the real context.
         let context_changed = own_bg.is_some() || tag == "a" || cls.fg.is_some();
-        let needed = required_contrast(orig_fg, mapped_bg, orig_bg);
+        let needed = required_contrast(orig_fg, mapped_bg, orig_bg, strict);
         if context_changed
             && !explicit
             && !image
             && contrast(mapped_fg.over(mapped_bg), mapped_bg) < needed
         {
-            let desired = map_fg(orig_fg, mapped_bg, orig_bg);
+            let desired = map_fg(orig_fg, mapped_bg, orig_bg, strict);
             new_style = Some(prepend_style(
                 new_style,
                 &format!("color:{}", desired.css()),
@@ -221,6 +307,9 @@ fn on_element(w: &mut Walker, el: &mut lol_html::html_content::Element) {
         if let Some(s) = new_style {
             let _ = el.set_attribute("style", &s);
         }
+    }
+    if let Mode::Transform(Policy::Fixed(palette)) = w.mode {
+        fixed_colors(w, el, palette, in_link, attr_bg, font_fg);
     }
 
     if tag == "img"
@@ -233,7 +322,7 @@ fn on_element(w: &mut Walker, el: &mut lol_html::html_content::Element) {
         if low_new > IMAGE_LOW_FRACTION && low_orig <= IMAGE_LOW_FRACTION {
             let backdrop = orig_bg.over(WHITE).css();
             let decl = match w.mode {
-                Mode::Transform => format!("background-color:{backdrop};border-radius:4px"),
+                Mode::Transform(_) => format!("background-color:{backdrop};border-radius:4px"),
                 // `only light` stops Blink's forced darkening of the backdrop itself.
                 Mode::Scan => {
                     format!("color-scheme:only light;background-color:{backdrop};border-radius:4px")
@@ -251,6 +340,7 @@ fn on_element(w: &mut Walker, el: &mut lol_html::html_content::Element) {
         orig_bg,
         mapped_bg,
         image,
+        link: in_link,
     };
     if let Some(handlers) = el.end_tag_handlers() {
         w.stack.push(frame);
@@ -305,12 +395,21 @@ pub fn process(sanitized: &str, mode: Mode) -> DomResult {
         }
     }
     let root = match mode {
-        Mode::Transform => Frame {
+        Mode::Transform(Policy::Dark { strict }) => Frame {
             orig_fg: BLACK,
-            mapped_fg: text_color(),
+            mapped_fg: text_color(strict),
             orig_bg: WHITE,
             mapped_bg: CANVAS,
             image: false,
+            link: false,
+        },
+        Mode::Transform(Policy::Fixed(palette)) => Frame {
+            orig_fg: BLACK,
+            mapped_fg: palette.text,
+            orig_bg: WHITE,
+            mapped_bg: palette.bg,
+            image: false,
+            link: false,
         },
         Mode::Scan => Frame {
             orig_fg: BLACK,
@@ -318,6 +417,7 @@ pub fn process(sanitized: &str, mode: Mode) -> DomResult {
             orig_bg: WHITE,
             mapped_bg: blink_auto_dark_bg(WHITE),
             image: false,
+            link: false,
         },
     };
     let walker = Rc::new(RefCell::new(Walker {
@@ -325,21 +425,29 @@ pub fn process(sanitized: &str, mode: Mode) -> DomResult {
         stack: vec![root],
         simple,
         link_orig,
-        link_mapped: if mode == Mode::Transform {
-            map_fg(link_orig, CANVAS, WHITE)
-        } else {
-            link_orig
+        link_mapped: match mode {
+            Mode::Transform(Policy::Dark { strict }) => map_fg(link_orig, CANVAS, WHITE, strict),
+            Mode::Transform(Policy::Fixed(palette)) => palette.link,
+            Mode::Scan => link_orig,
         },
         stats,
     }));
 
     // Pass 2: elements.
     let head_css = match mode {
-        Mode::Transform => format!(
+        Mode::Transform(Policy::Dark { strict }) => format!(
             "<style>:root{{color-scheme:dark!important}}:where(html){{background-color:{};color:{}}}:where(a:link),:where(a:visited){{color:{}}}</style>",
             CANVAS.css(),
-            text_color().css(),
-            link_color().css()
+            text_color(strict).css(),
+            link_color(strict).css()
+        ),
+        // The palette on the root covers unstyled text; system colours follow the scheme.
+        Mode::Transform(Policy::Fixed(palette)) => format!(
+            "<style>:root{{color-scheme:{}!important;background-color:{}!important;color:{}!important}}:where(a:link),:where(a:visited){{color:{}}}</style>",
+            if palette.dark { "dark" } else { "light" },
+            palette.bg.css(),
+            palette.text.css(),
+            palette.link.css()
         ),
         // Sender ships dark CSS: opt the document out of Blink auto-dark and let it apply.
         // Otherwise neutralise any declared color-scheme so Blink's auto-dark applies.
@@ -362,14 +470,14 @@ pub fn process(sanitized: &str, mode: Mode) -> DomResult {
                     move |t| {
                         if t.last_in_text_node() {
                             let mut i = idx.borrow_mut();
-                            if mode == Mode::Transform {
+                            if mode != Mode::Scan {
                                 t.replace(
                                     sheets.get(*i).map(String::as_str).unwrap_or(""),
                                     ContentType::Html,
                                 );
                             }
                             *i += 1;
-                        } else if mode == Mode::Transform {
+                        } else if mode != Mode::Scan {
                             t.remove();
                         }
                         Ok(())

@@ -326,7 +326,13 @@ fuzz_target!(|data: &[u8]| {
         '\u{202a}'..='\u{202e}' | '\u{2066}'..='\u{2069}' | '\u{200b}' | '\u{feff}'
     ) || (c.is_control() && c != '\n' && c != '\t')));
     if let Ok(s) = std::str::from_utf8(html) {
-        let theme = [Theme::Light, Theme::Dark, Theme::DarkStrict][usize::from(sel % 3)];
+        let theme = [
+            Theme::Light,
+            Theme::Dark,
+            Theme::DarkStrict,
+            Theme::HighContrast,
+            Theme::HighContrastDark,
+        ][usize::from(sel % 5)];
         let ids = vec![mailsanitize::cid_resource_id(b"a@b")];
         let out = mailsanitize::sanitize(s, theme, ids, &cfg);
         check_manifest(&out.manifest);

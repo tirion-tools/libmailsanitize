@@ -1,5 +1,5 @@
-//! CSS handling on top of lightningcss: sanitizing re-serialisation, the dark-policy
-//! recolouring visitor, and background/foreground scans used for DOM context.
+//! CSS handling on top of lightningcss: sanitizing re-serialisation, the recolouring visitor (dark
+//! policy or fixed palette), and background/foreground scans used for DOM context.
 
 use std::convert::Infallible;
 
@@ -7,6 +7,7 @@ use lightningcss::declaration::DeclarationBlock;
 use lightningcss::properties::Property;
 use lightningcss::properties::custom::{CustomPropertyName, Token, TokenList, TokenOrValue};
 use lightningcss::rules::{CssRule, CssRuleList};
+use lightningcss::selector::{Component, PseudoClass, SelectorList};
 use lightningcss::stylesheet::{ParserOptions, PrinterOptions, StyleAttribute, StyleSheet};
 use lightningcss::traits::{Parse, ToCss};
 use lightningcss::values::color::{CssColor, RGBA};
@@ -15,7 +16,7 @@ use lightningcss::values::url::Url;
 use lightningcss::visit_types;
 use lightningcss::visitor::{Visit, VisitTypes, Visitor};
 
-use crate::color::{CANVAS, Rgb, Role, map};
+use crate::color::{CANVAS, Policy, Rgb, Role, map};
 
 const WHITE: Rgb = Rgb::hex(0xffffff);
 
@@ -471,10 +472,41 @@ fn parse_compound(s: &str) -> Option<Compound> {
     Some(out)
 }
 
+/// The rule styles links: the subject of every selector is a link (`a`, `:link`, `:visited`,
+/// `:any-link`, `:local-link`) or sits inside one (`a span`, `a::after`, `a > b + c`).
+fn styles_links(selectors: &SelectorList) -> bool {
+    let link = |c: &Component| match c {
+        Component::LocalName(n) => n.lower_name.0.eq_ignore_ascii_case("a"),
+        Component::NonTSPseudoClass(p) => {
+            matches!(
+                p,
+                PseudoClass::Link | PseudoClass::Visited | PseudoClass::LocalLink
+            ) || matches!(p, PseudoClass::AnyLink(_))
+        }
+        _ => false,
+    };
+    selectors.0.iter().all(|s| {
+        // Compounds from the subject leftwards. One left of a child or descendant combinator (or
+        // of the one before a pseudo-element) is an ancestor of the subject; one left of a sibling
+        // combinator is not.
+        let mut iter = s.iter();
+        let mut ancestor = true;
+        loop {
+            if iter.by_ref().any(|c| ancestor && link(c)) {
+                return true;
+            }
+            match iter.next_sequence() {
+                Some(combinator) => ancestor = combinator.is_ancestor(),
+                None => return false,
+            }
+        }
+    })
+}
+
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub enum Mode {
-    /// Rewrite colours.
-    Transform,
+    /// Rewrite colours under the policy.
+    Transform(Policy),
     /// Only detect sender dark CSS and collect simple rules (hybrid preflight).
     Scan,
 }
@@ -485,6 +517,8 @@ pub struct Recolor {
     ctx_bg: Rgb,
     ctx_orig_bg: Rgb,
     image_ctx: bool,
+    /// The colours style a link's text (fixed palette only).
+    link: bool,
     pub sender_dark: bool,
     pub simple: Vec<SimpleRule>,
     pub stats: Stats,
@@ -498,6 +532,7 @@ impl Recolor {
             ctx_bg,
             ctx_orig_bg,
             image_ctx,
+            link: false,
             sender_dark: false,
             simple: Vec::new(),
             stats: Stats::default(),
@@ -538,7 +573,7 @@ impl<'i> Visitor<'i> for Recolor {
         visit_types!(RULES | PROPERTIES | COLORS)
     }
     fn visit_rule_list(&mut self, rules: &mut CssRuleList<'i>) -> Result<(), Self::Error> {
-        if self.mode == Mode::Scan {
+        if !matches!(self.mode, Mode::Transform(Policy::Dark { .. })) {
             return rules.visit_children(self);
         }
         // The sender's own dark design is resolved statically: plain
@@ -573,7 +608,9 @@ impl<'i> Visitor<'i> for Recolor {
                     .query
                     .to_css_string(PrinterOptions::default())
                     .unwrap_or_default();
-                if is_dark_media(&query) {
+                // A fixed palette re-colours the sender's dark design like the rest.
+                if is_dark_media(&query) && !matches!(self.mode, Mode::Transform(Policy::Fixed(_)))
+                {
                     // The sender's own dark design: kept verbatim and applied by prefers-color-scheme.
                     self.sender_dark = true;
                     self.stats.sender_dark_rules_kept += m.rules.0.len() as u32;
@@ -600,15 +637,18 @@ impl<'i> Visitor<'i> for Recolor {
                 if self.mode == Mode::Scan {
                     return Ok(());
                 }
-                let saved = (self.ctx_bg, self.ctx_orig_bg, self.image_ctx);
-                if let Some(bg) = colors.bg {
+                let saved = (self.ctx_bg, self.ctx_orig_bg, self.image_ctx, self.link);
+                if let Mode::Transform(Policy::Fixed(_)) = self.mode {
+                    // Nested rules of a link rule (`a{span{…}}`) style inside the link.
+                    self.link |= styles_links(&s.selectors);
+                } else if let Some(bg) = colors.bg {
                     self.ctx_bg = crate::color::map_bg(bg).over(CANVAS);
                     self.ctx_orig_bg = bg.over(WHITE);
                 }
                 self.image_ctx |= colors.image;
                 s.declarations.visit(self)?;
                 s.rules.visit(self)?;
-                (self.ctx_bg, self.ctx_orig_bg, self.image_ctx) = saved;
+                (self.ctx_bg, self.ctx_orig_bg, self.image_ctx, self.link) = saved;
                 Ok(())
             }
             _ => rule.visit_children(self),
@@ -623,15 +663,32 @@ impl<'i> Visitor<'i> for Recolor {
         p.visit_children(self)
     }
     fn visit_color(&mut self, c: &mut CssColor) -> Result<(), Self::Error> {
-        if self.mode == Mode::Scan {
-            return Ok(());
-        }
+        let strict = match self.mode {
+            Mode::Scan => return Ok(()),
+            Mode::Transform(Policy::Fixed(palette)) => {
+                // Fully transparent paints nothing and stays. Every other colour (`currentColor`,
+                // system colours and `light-dark()` included) becomes the palette's, text on
+                // background images too.
+                let rgb = to_rgb(c);
+                if rgb.is_some_and(|x| x.a <= 0.001) {
+                    return Ok(());
+                }
+                self.stats.colors_seen += 1;
+                let new = palette.color(self.role, self.link);
+                if rgb != Some(new) {
+                    *c = to_css_color(new);
+                    self.stats.colors_rewritten += 1;
+                }
+                return Ok(());
+            }
+            Mode::Transform(Policy::Dark { strict }) => strict,
+        };
         let Some(rgb) = to_rgb(c) else { return Ok(()) };
         self.stats.colors_seen += 1;
         if self.role == Role::Foreground && self.image_ctx {
             return Ok(()); // text designed for a background image: keep the sender's colour
         }
-        let new = map(rgb, self.role, self.ctx_bg, self.ctx_orig_bg);
+        let new = map(rgb, self.role, self.ctx_bg, self.ctx_orig_bg, strict);
         if new != rgb {
             *c = to_css_color(new);
             self.stats.colors_rewritten += 1;
@@ -661,7 +718,7 @@ pub fn process_stylesheet(css: &str, mode: Mode) -> SheetResult {
     };
     let mut v = Recolor::new(mode, CANVAS, WHITE, false);
     let _ = sheet.visit(&mut v);
-    let css = if mode == Mode::Transform {
+    let css = if mode != Mode::Scan {
         sheet_html(&sheet)
     } else {
         css.to_string()
@@ -674,16 +731,20 @@ pub fn process_stylesheet(css: &str, mode: Mode) -> SheetResult {
     }
 }
 
-/// Recolours an inline style attribute in the given context. Returns the new value and stats.
+/// Recolours an inline style attribute in the given context (`link`: the element is a link or
+/// inside one). Returns the new value and stats.
 pub fn recolor_style_attr(
     value: &str,
+    policy: Policy,
     ctx_bg: Rgb,
     ctx_orig_bg: Rgb,
     image_ctx: bool,
+    link: bool,
     stats: &mut Stats,
 ) -> Option<String> {
     let mut attr = StyleAttribute::parse(value, parser_options()).ok()?;
-    let mut v = Recolor::new(Mode::Transform, ctx_bg, ctx_orig_bg, image_ctx);
+    let mut v = Recolor::new(Mode::Transform(policy), ctx_bg, ctx_orig_bg, image_ctx);
+    v.link = link;
     let _ = attr.declarations.visit(&mut v);
     stats.colors_seen += v.stats.colors_seen;
     stats.colors_rewritten += v.stats.colors_rewritten;
@@ -694,6 +755,110 @@ pub fn recolor_style_attr(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    use crate::color::{HIGH_CONTRAST, HIGH_CONTRAST_DARK};
+
+    const POLICIES: [Policy; 4] = [
+        Policy::Dark { strict: false },
+        Policy::Dark { strict: true },
+        Policy::Fixed(HIGH_CONTRAST),
+        Policy::Fixed(HIGH_CONTRAST_DARK),
+    ];
+
+    fn first_rule_styles_links(css: &str) -> bool {
+        let sheet = StyleSheet::parse(css, parser_options()).expect("parses");
+        match &sheet.rules.0[0] {
+            CssRule::Style(s) => styles_links(&s.selectors),
+            other => panic!("{css}: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn link_rules_are_those_whose_subject_is_in_a_link() {
+        for css in [
+            "a{}",
+            "A{}",
+            "a:link{}",
+            "a:visited,a:hover{}",
+            ":link{}",
+            ":any-link{}",
+            ".x a.btn{}",
+            "a span{}",
+            "td > a > b{}",
+            "a > b + c{}",
+            "a::after{}",
+            "#id a:hover strong{}",
+        ] {
+            assert!(first_rule_styles_links(css), "{css}");
+        }
+        for css in [
+            "p{}",
+            "a, p{}",
+            "abbr{}",
+            ".a{}",
+            "a + p{}",
+            "a ~ p span{}",
+            "[href]{}",
+        ] {
+            assert!(!first_rule_styles_links(css), "{css}");
+        }
+    }
+
+    /// A colour as the printer writes it.
+    fn printed(c: Rgb) -> String {
+        to_css_color(c).to_css_string(printer()).expect("prints")
+    }
+
+    #[test]
+    fn a_fixed_palette_replaces_every_colour_of_a_sheet() {
+        for p in [HIGH_CONTRAST, HIGH_CONTRAST_DARK] {
+            let css = process_stylesheet(
+                "body{color:#333;background:#fafafa linear-gradient(red,blue)}\
+                 p{color:currentColor;background-color:light-dark(#fff,#000);border:1px solid #ccc}\
+                 a,a:visited{color:#f0f0f0!important;text-decoration-color:olive}\
+                 .btn span{color:Canvas;background-color:transparent;outline-color:rgba(9,9,9,.5)}\
+                 @media (prefers-color-scheme:dark){p{color:#eee}}\
+                 a{span{color:green}}",
+                Mode::Transform(Policy::Fixed(p)),
+            )
+            .css;
+            let (text, bg, link) = (printed(p.text), printed(p.bg), printed(p.link));
+            for want in [
+                format!("body{{color:{text};background:"),
+                format!("linear-gradient({bg},{bg})"),
+                format!("color:{text};background-color:{bg};border:1px solid {text}"),
+                format!("a,a:visited{{text-decoration-color:{link};color:{link}!important}}"),
+                format!("@media (prefers-color-scheme:dark){{p{{color:{text}}}}}"),
+                format!("span{{color:{link}}}"),
+                format!("outline-color:{text}"),
+            ] {
+                assert!(css.contains(&want), "{want} not in {css}");
+            }
+            for gone in [
+                "#333",
+                "#fafafa",
+                "red",
+                "blue",
+                "#ccc",
+                "f0f0f0",
+                "olive",
+                "Canvas",
+                "#eee",
+                "green",
+                "light-dark",
+                "currentColor",
+                "rgba",
+            ] {
+                assert!(!css.contains(gone), "{gone} in {css}");
+            }
+            // The span of `.btn span` is not known to be in a link; transparent stays.
+            assert!(css.contains(&format!(".btn span{{color:{text};")), "{css}");
+            assert!(
+                !css.contains(&format!("background-color:{bg};outline")),
+                "{css}"
+            );
+        }
+    }
 
     #[test]
     fn printed_css_opens_no_markup() {
@@ -736,17 +901,25 @@ mod tests {
         );
         let attr = sanitize_style_attr(r#"font-family:"\3cscript\3e""#).expect("kept");
         assert_eq!(attr, r#"font-family:"\3c script>""#);
-        let dark = process_stylesheet(r#"a{font-family:"\3c/style\3e"}"#, Mode::Transform).css;
-        assert!(!dark.contains("</"), "{dark}");
-        let recolored = recolor_style_attr(
-            r#"font-family:"\3c/style\3e""#,
-            CANVAS,
-            WHITE,
-            false,
-            &mut Stats::default(),
-        )
-        .expect("kept");
-        assert!(!recolored.contains("</"), "{recolored}");
+        for policy in POLICIES {
+            let css = process_stylesheet(
+                r#"a{font-family:"\3c/style\3e";color:red}"#,
+                Mode::Transform(policy),
+            )
+            .css;
+            assert!(!css.contains("</"), "{css}");
+            let recolored = recolor_style_attr(
+                r#"font-family:"\3c/style\3e";color:red"#,
+                policy,
+                CANVAS,
+                WHITE,
+                false,
+                false,
+                &mut Stats::default(),
+            )
+            .expect("kept");
+            assert!(!recolored.contains("</"), "{recolored}");
+        }
     }
 
     /// A nested rule flattened with its braces lost (`&::before{...}` from SCSS).
